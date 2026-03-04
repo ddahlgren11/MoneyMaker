@@ -37,11 +37,47 @@ class TweetSchema(BaseModel):
     sentiment_score: float
     refined_sentiment: str
 
-@app.post("/ingest")
-def ingest_tweets(tweets: List[TweetSchema]):
+@app.post("/ingest/tweets")
+async def ingest_tweets(tweets: List[TweetSchema]):
     db = SessionLocal()
     for t in tweets:
         new_tweet = TweetRecord(**t.dict())
         db.add(new_tweet)
     db.commit()
     return {"status": "success", "count": len(tweets)}
+
+class StockRecord(Base):
+    __tablename__ = "stocks"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String)
+    timestamp = Column(String)  # We store as string to match the Colab conversion
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    volume = Column(Float)
+
+# Add this to your Pydantic models section
+class StockSchema(BaseModel):
+    symbol: str
+    timestamp: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+@app.post("/ingest/stocks")
+async def ingest_stocks(stocks: List[StockSchema]):
+    db = SessionLocal()
+    try:
+        for s in stocks:
+            new_stock = StockRecord(**s.dict())
+            db.add(new_stock)
+        db.commit()
+        return {"status": "success", "message": f"Saved {len(stocks)} stock records"}
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        db.close()
