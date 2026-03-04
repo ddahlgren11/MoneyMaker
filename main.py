@@ -17,7 +17,7 @@ Base = declarative_base()
 
 # Dependency to handle DB sessions
 def get_db():
-    db = SessionLocal()
+    db = SessionLocal()m
     try:
         yield db
     finally:
@@ -92,14 +92,16 @@ class MergedSchema(BaseModel):
 @app.post("/ingest/tweets")
 async def ingest_tweets(tweets: List[TweetSchema], db: Session = Depends(get_db)):
     for t in tweets:
-        db.add(TweetRecord(**t.dict()))
+        # .model_dump() is the modern version of .dict()
+        db.add(TweetRecord(**t.model_dump()))
     db.commit()
     return {"status": "success", "count": len(tweets)}
 
+# Updated Stock endpoint
 @app.post("/ingest/stocks")
 async def ingest_stocks(stocks: List[StockSchema], db: Session = Depends(get_db)):
     for s in stocks:
-        db.add(StockRecord(**s.dict()))
+        db.add(StockRecord(**s.model_dump()))
     db.commit()
     return {"status": "success", "count": len(stocks)}
 
