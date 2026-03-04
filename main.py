@@ -87,6 +87,12 @@ class MergedSchema(BaseModel):
     close: float 
     volume: float
 
+class ClassifiedTweetSchema(BaseModel):
+    text: str
+    refined_sentiment: str
+    tone_category: str
+    tweet_type: str
+
 # --- ENDPOINTS ---
 
 @app.post("/ingest/tweets")
@@ -122,6 +128,20 @@ async def ingest_merged(data: List[MergedSchema], db: Session = Depends(get_db))
         db.add(db_item)
     db.commit()
     return {"status": "success", "count": len(data)}
+
+@app.post("/ingest/classified_tweets")
+async def ingest_classified_tweets(tweets: List[ClassifiedTweetSchema], db: Session = Depends(get_db)):
+    for t in tweets:
+        # Reusing the MergedRecord table or create a new 'ClassifiedRecord' if preferred
+        db_item = MergedRecord(
+            tweet_text=t.text,
+            refined_sentiment=t.refined_sentiment,
+            tone_category=t.tone_category,
+            tweet_type=t.tweet_type
+        )
+        db.add(db_item)
+    db.commit()
+    return {"status": "success", "count": len(tweets)}
 
 # This creates the tables in Neon if they don't exist
 Base.metadata.create_all(bind=engine)
