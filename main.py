@@ -10,14 +10,23 @@ from typing import List
 load_dotenv()
 
 # Setup Database
-DATABASE_URL = os.getenv("DATABASE_URL") # This comes from Render/Secrets
+DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-engine = create_engine(DATABASE_URL)
+# Dependency to handle DB sessions
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-# Define your Tweet table
+app = FastAPI()
+
+# --- DATABASE MODELS ---
+
 class TweetRecord(Base):
     __tablename__ = "tweets"
     id = Column(Integer, primary_key=True, index=True)
@@ -26,38 +35,38 @@ class TweetRecord(Base):
     sentiment_score = Column(Float)
     refined_sentiment = Column(String)
 
-Base.metadata.create_all(bind=engine)
-
-app = FastAPI()
-
-# Pydantic model for data coming from Colab
-class TweetSchema(BaseModel):
-    ceo: str
-    text: str
-    sentiment_score: float
-    refined_sentiment: str
-
-@app.post("/ingest/tweets")
-async def ingest_tweets(tweets: List[TweetSchema]):
-    db = SessionLocal()
-    for t in tweets:
-        new_tweet = TweetRecord(**t.dict())
-        db.add(new_tweet)
-    db.commit()
-    return {"status": "success", "count": len(tweets)}
-
 class StockRecord(Base):
     __tablename__ = "stocks"
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String)
-    timestamp = Column(String)  # We store as string to match the Colab conversion
+    timestamp = Column(String) 
     open = Column(Float)
     high = Column(Float)
     low = Column(Float)
     close = Column(Float)
     volume = Column(Float)
 
-# Add this to your Pydantic models section
+class MergedRecord(Base):
+    __tablename__ = "merged_data"
+    id = Column(Integer, primary_key=True, index=True)
+    date = Column(String)
+    ceo = Column(String)
+    tweet_text = Column(String)
+    sentiment_score = Column(Float)
+    refined_sentiment = Column(String)
+    tone_category = Column(String)
+    tweet_type = Column(String)
+    stock_close = Column(Float)
+    stock_volume = Column(Float)
+
+# --- PYDANTIC SCHEMAS ---
+
+class TweetSchema(BaseModel):
+    ceo: str
+    text: str
+    sentiment_score: float
+    refined_sentiment: str
+
 class StockSchema(BaseModel):
     symbol: str
     timestamp: str
@@ -67,17 +76,50 @@ class StockSchema(BaseModel):
     close: float
     volume: float
 
+class MergedSchema(BaseModel):
+    date: str
+    ceo: str
+    text: str 
+    sentiment_score: float
+    refined_sentiment: str
+    tone_category: str
+    tweet_type: str
+    close: float 
+    volume: float
+
+# --- ENDPOINTS ---
+
+@app.post("/ingest/tweets")
+async def ingest_tweets(tweets: List[TweetSchema], db: Session = Depends(get_db)):
+    for t in tweets:
+        db.add(TweetRecord(**t.dict()))
+    db.commit()
+    return {"status": "success", "count": len(tweets)}
+
 @app.post("/ingest/stocks")
-async def ingest_stocks(stocks: List[StockSchema]):
-    db = SessionLocal()
-    try:
-        for s in stocks:
-            new_stock = StockRecord(**s.dict())
-            db.add(new_stock)
-        db.commit()
-        return {"status": "success", "message": f"Saved {len(stocks)} stock records"}
-    except Exception as e:
-        db.rollback()
-        return {"status": "error", "message": str(e)}
-    finally:
-        db.close()
+async def ingest_stocks(stocks: List[StockSchema], db: Session = Depends(get_db)):
+    for s in stocks:
+        db.add(StockRecord(**s.dict()))
+    db.commit()
+    return {"status": "success", "count": len(stocks)}
+
+@app.post("/ingest/merged")
+async def ingest_merged(data: List[MergedSchema], db: Session = Depends(get_db)):
+    for item in data:
+        db_item = MergedRecord(
+            date=item.date,
+            ceo=item.ceo,
+            tweet_text=item.text,
+            sentiment_score=item.sentiment_score,
+            refined_sentiment=item.refined_sentiment,
+            tone_category=item.tone_category,
+            tweet_type=item.tweet_type,
+            stock_close=item.close,
+            stock_volume=item.volume
+        )
+        db.add(db_item)
+    db.commit()
+    return {"status": "success", "count": len(data)}
+
+# This creates the tables in Neon if they don't exist
+Base.metadata.create_all(bind=engine)
