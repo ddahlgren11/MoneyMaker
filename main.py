@@ -96,34 +96,50 @@ proc = DataProcessor()
 
 @app.post("/process/all")
 async def process_and_save_all(db: Session = Depends(get_db)):
-    """Fetches data, classifies it, and saves it to Neon automatically."""
+    """
+    Fetches data for multiple CEOs, classifies it, and saves it to Neon.
+    This replaces the manual looping previously done in Colab.
+    """
+    # Map of CEO usernames to their respective Stock Tickers
+    targets = {
+        "elonmusk": "TSLA",
+        "tim_cook": "AAPL",
+        "satyanadella": "MSFT"
+    }
+    
+    total_records = 0
+    
     try:
-        # 1. Fetch Tweets using processor logic
-        tweets_df = await proc.get_tweets("elonmusk")
-        
-        # 2. Fetch Stock Data
-        stocks_df = proc.get_stocks("TSLA")
-        
-        # 3. Process each tweet and save to merged_data
-        for _, row in tweets_df.iterrows():
-            sentiment = row['sentiment']
-            text = row['text']
+        for username, ticker in targets.items():
+            # 1. Fetch Tweets using processor logic
+            tweets_df = await proc.get_tweets(username)
             
-            new_record = MergedRecord(
-                date=row['created_at'].isoformat(),
-                ceo=row['ceo'],
-                tweet_text=text,
-                sentiment_score=sentiment,
-                refined_sentiment=get_refined_sentiment(sentiment),
-                tone_category=get_tone_category(text, sentiment),
-                tweet_type=get_tweet_type(text),
-                stock_close=stocks_df['close'].iloc[-1] if not stocks_df.empty else 0.0,
-                stock_volume=stocks_df['volume'].iloc[-1] if not stocks_df.empty else 0.0
-            )
-            db.add(new_record)
+            # 2. Fetch Stock Data for the associated ticker
+            stocks_df = proc.get_stocks(ticker)
+            
+            # 3. Process and merge each tweet
+            for _, row in tweets_df.iterrows():
+                sentiment = row['sentiment']
+                text = row['text']
+                
+                new_record = MergedRecord(
+                    date=row['created_at'].isoformat(),
+                    ceo=username,
+                    tweet_text=text,
+                    sentiment_score=sentiment,
+                    refined_sentiment=get_refined_sentiment(sentiment),
+                    tone_category=get_tone_category(text, sentiment),
+                    tweet_type=get_tweet_type(text),
+                    # Uses latest available stock data for that ticker
+                    stock_close=stocks_df['close'].iloc[-1] if not stocks_df.empty else 0.0,
+                    stock_volume=stocks_df['volume'].iloc[-1] if not stocks_df.empty else 0.0
+                )
+                db.add(new_record)
+                total_records += 1
         
         db.commit()
-        return {"status": "Success", "records_added": len(tweets_df)}
+        return {"status": "Success", "records_added": total_records}
+        
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -143,19 +159,6 @@ async def ingest_stocks(stocks: List[StockSchema], db: Session = Depends(get_db)
         db.add(StockRecord(**s.model_dump()))
     db.commit()
     return {"status": "success", "count": len(stocks)}
-
-@app.post("/ingest/merged")
-async def ingest_merged(data: List[MergedSchema], db: Session = Depends(get_db)):
-    for item in data:
-        db_item = MergedRecord(
-            date=item.date, ceo=item.ceo, tweet_text=item.text,
-            sentiment_score=item.sentiment_score, refined_sentiment=item.refined_sentiment,
-            tone_category=item.tone_category, tweet_type=item.tweet_type,
-            stock_close=item.close, stock_volume=item.volume
-        )
-        db.add(db_item)
-    db.commit()
-    return {"status": "success", "count": len(data)}
 
 @app.get("/")
 def read_root():

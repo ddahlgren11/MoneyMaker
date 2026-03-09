@@ -5,3 +5,7 @@ sqlalchemy
 psycopg2-binary
 pydantic
 python-dotenv
+pandas 
+tweety-ns 
+textblob 
+alpaca-py 
