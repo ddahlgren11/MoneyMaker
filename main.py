@@ -134,8 +134,8 @@ async def process_and_save_all(db: Session = Depends(get_db)):
             
             # 3. Process and merge each tweet
             for _, row in tweets_df.iterrows():
-                sentiment = row['sentiment']
-                text = row['text']
+                sentiment = float(row['sentiment'])
+                text = str(row['text'])
                 tweet_date = row['created_at']
 
                 # Match weekend tweets to following Monday
@@ -152,8 +152,8 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                 if not stocks_df.empty:
                     valid_stocks = stocks_df[stocks_df['date_only'] >= target_date_only]
                     if not valid_stocks.empty:
-                        stock_close = valid_stocks['close'].iloc[0]
-                        stock_volume = valid_stocks['volume'].iloc[0]
+                        stock_close = float(valid_stocks['close'].iloc[0])
+                        stock_volume = float(valid_stocks['volume'].iloc[0])
                 
                 new_record = MergedRecord(
                     date=tweet_date.isoformat(),
