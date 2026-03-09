@@ -33,11 +33,13 @@ class DataProcessor:
             })
         return pd.DataFrame(all_tweets)
 
-    def get_stocks(self, symbol):
-        # Fetching data from 1 day ago to avoid SIP restrictions
-        end_date = datetime.now(timezone.utc) - timedelta(days=1)
-        start_date = end_date - timedelta(days=7)
-        
+    def get_stocks(self, symbol, start_date=None, end_date=None):
+        # Fetching data from 1 day ago to avoid SIP restrictions if not provided
+        if end_date is None:
+            end_date = datetime.now(timezone.utc) - timedelta(days=1)
+        if start_date is None:
+            start_date = end_date - timedelta(days=7)
+
         request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start_date, end=end_date)
         bars = self.stock_client.get_stock_bars(request)
-        return bars.df
+        return bars.df if bars else pd.DataFrame()

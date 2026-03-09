@@ -1,4 +1,6 @@
 import os
+import pandas as pd
+from datetime import timedelta
 from typing import List
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException
@@ -113,26 +115,56 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         for username, ticker in targets.items():
             # 1. Fetch Tweets using processor logic
             tweets_df = await proc.get_tweets(username)
+            if tweets_df.empty:
+                continue
+
+            # Calculate date range with padding for weekends/holidays
+            min_date = tweets_df['created_at'].min() - timedelta(days=5)
+            max_date = tweets_df['created_at'].max() + timedelta(days=5)
             
             # 2. Fetch Stock Data for the associated ticker
-            stocks_df = proc.get_stocks(ticker)
+            stocks_df = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
+
+            if not stocks_df.empty:
+                if isinstance(stocks_df.index, pd.MultiIndex):
+                    stock_dates = stocks_df.index.get_level_values('timestamp').date
+                else:
+                    stock_dates = stocks_df.index.date
+                stocks_df['date_only'] = stock_dates
             
             # 3. Process and merge each tweet
             for _, row in tweets_df.iterrows():
-                sentiment = row['sentiment']
-                text = row['text']
+                sentiment = float(row['sentiment'])
+                text = str(row['text'])
+                tweet_date = row['created_at']
+
+                # Match weekend tweets to following Monday
+                target_date = tweet_date
+                if target_date.weekday() == 5:  # Saturday
+                    target_date += timedelta(days=2)
+                elif target_date.weekday() == 6:  # Sunday
+                    target_date += timedelta(days=1)
+
+                target_date_only = target_date.date()
+
+                stock_close = 0.0
+                stock_volume = 0.0
+                if not stocks_df.empty:
+                    valid_stocks = stocks_df[stocks_df['date_only'] >= target_date_only]
+                    if not valid_stocks.empty:
+                        stock_close = float(valid_stocks['close'].iloc[0])
+                        stock_volume = float(valid_stocks['volume'].iloc[0])
                 
                 new_record = MergedRecord(
-                    date=row['created_at'].isoformat(),
+                    date=tweet_date.isoformat(),
                     ceo=username,
                     tweet_text=text,
                     sentiment_score=sentiment,
                     refined_sentiment=get_refined_sentiment(sentiment),
                     tone_category=get_tone_category(text, sentiment),
                     tweet_type=get_tweet_type(text),
-                    # Uses latest available stock data for that ticker
-                    stock_close=stocks_df['close'].iloc[-1] if not stocks_df.empty else 0.0,
-                    stock_volume=stocks_df['volume'].iloc[-1] if not stocks_df.empty else 0.0
+                    stock_close=stock_close,
+                    stock_volume=stock_volume
                 )
                 db.add(new_record)
                 total_records += 1
