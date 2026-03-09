@@ -1,21 +1,24 @@
 import os
+from typing import List
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
-from typing import List
+
+# Import the logic from your new files
+from processor import DataProcessor
+from classifier import get_refined_sentiment, get_tone_category, get_tweet_type
 
 load_dotenv()
 
-# Setup Database
+# --- DATABASE SETUP ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-# Dependency to handle DB sessions
 def get_db():
     db = SessionLocal()
     try:
@@ -23,10 +26,7 @@ def get_db():
     finally:
         db.close()
 
-app = FastAPI()
-
 # --- DATABASE MODELS ---
-
 class TweetRecord(Base):
     __tablename__ = "tweets"
     id = Column(Integer, primary_key=True, index=True)
@@ -39,7 +39,7 @@ class StockRecord(Base):
     __tablename__ = "stocks"
     id = Column(Integer, primary_key=True, index=True)
     symbol = Column(String)
-    timestamp = Column(String) 
+    timestamp = Column(String)
     open = Column(Float)
     high = Column(Float)
     low = Column(Float)
@@ -59,8 +59,10 @@ class MergedRecord(Base):
     stock_close = Column(Float)
     stock_volume = Column(Float)
 
-# --- PYDANTIC SCHEMAS ---
+# Create tables if they don't exist
+Base.metadata.create_all(bind=engine)
 
+# --- PYDANTIC SCHEMAS ---
 class TweetSchema(BaseModel):
     ceo: str
     text: str
@@ -79,31 +81,62 @@ class StockSchema(BaseModel):
 class MergedSchema(BaseModel):
     date: str
     ceo: str
-    text: str 
+    text: str
     sentiment_score: float
     refined_sentiment: str
     tone_category: str
     tweet_type: str
-    close: float 
+    close: float
     volume: float
 
-class ClassifiedTweetSchema(BaseModel):
-    text: str
-    refined_sentiment: str
-    tone_category: str
-    tweet_type: str
+app = FastAPI()
+proc = DataProcessor()
 
-# --- ENDPOINTS ---
+# --- ACTIVE "CONTROLLER" ENDPOINT ---
+
+@app.post("/process/all")
+async def process_and_save_all(db: Session = Depends(get_db)):
+    """Fetches data, classifies it, and saves it to Neon automatically."""
+    try:
+        # 1. Fetch Tweets using processor logic
+        tweets_df = await proc.get_tweets("elonmusk")
+        
+        # 2. Fetch Stock Data
+        stocks_df = proc.get_stocks("TSLA")
+        
+        # 3. Process each tweet and save to merged_data
+        for _, row in tweets_df.iterrows():
+            sentiment = row['sentiment']
+            text = row['text']
+            
+            new_record = MergedRecord(
+                date=row['created_at'].isoformat(),
+                ceo=row['ceo'],
+                tweet_text=text,
+                sentiment_score=sentiment,
+                refined_sentiment=get_refined_sentiment(sentiment),
+                tone_category=get_tone_category(text, sentiment),
+                tweet_type=get_tweet_type(text),
+                stock_close=stocks_df['close'].iloc[-1] if not stocks_df.empty else 0.0,
+                stock_volume=stocks_df['volume'].iloc[-1] if not stocks_df.empty else 0.0
+            )
+            db.add(new_record)
+        
+        db.commit()
+        return {"status": "Success", "records_added": len(tweets_df)}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- MANUAL INGESTION ENDPOINTS (BACKUPS) ---
 
 @app.post("/ingest/tweets")
 async def ingest_tweets(tweets: List[TweetSchema], db: Session = Depends(get_db)):
     for t in tweets:
-        # .model_dump() is the modern version of .dict()
         db.add(TweetRecord(**t.model_dump()))
     db.commit()
     return {"status": "success", "count": len(tweets)}
 
-# Updated Stock endpoint
 @app.post("/ingest/stocks")
 async def ingest_stocks(stocks: List[StockSchema], db: Session = Depends(get_db)):
     for s in stocks:
@@ -115,33 +148,15 @@ async def ingest_stocks(stocks: List[StockSchema], db: Session = Depends(get_db)
 async def ingest_merged(data: List[MergedSchema], db: Session = Depends(get_db)):
     for item in data:
         db_item = MergedRecord(
-            date=item.date,
-            ceo=item.ceo,
-            tweet_text=item.text,
-            sentiment_score=item.sentiment_score,
-            refined_sentiment=item.refined_sentiment,
-            tone_category=item.tone_category,
-            tweet_type=item.tweet_type,
-            stock_close=item.close,
-            stock_volume=item.volume
+            date=item.date, ceo=item.ceo, tweet_text=item.text,
+            sentiment_score=item.sentiment_score, refined_sentiment=item.refined_sentiment,
+            tone_category=item.tone_category, tweet_type=item.tweet_type,
+            stock_close=item.close, stock_volume=item.volume
         )
         db.add(db_item)
     db.commit()
     return {"status": "success", "count": len(data)}
 
-@app.post("/ingest/classified_tweets")
-async def ingest_classified_tweets(tweets: List[ClassifiedTweetSchema], db: Session = Depends(get_db)):
-    for t in tweets:
-        # Reusing the MergedRecord table or create a new 'ClassifiedRecord' if preferred
-        db_item = MergedRecord(
-            tweet_text=t.text,
-            refined_sentiment=t.refined_sentiment,
-            tone_category=t.tone_category,
-            tweet_type=t.tweet_type
-        )
-        db.add(db_item)
-    db.commit()
-    return {"status": "success", "count": len(tweets)}
-
-# This creates the tables in Neon if they don't exist
-Base.metadata.create_all(bind=engine)
+@app.get("/")
+def read_root():
+    return {"message": "MoneyMaker Active Controller API"}
