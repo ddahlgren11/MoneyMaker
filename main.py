@@ -60,6 +60,7 @@ class MergedRecord(Base):
     tweet_type = Column(String)
     stock_close = Column(Float)
     stock_volume = Column(Float)
+    stock_open_close_diff = Column(Float)
 
 # Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
@@ -90,6 +91,7 @@ class MergedSchema(BaseModel):
     tweet_type: str
     close: float
     volume: float
+    open_close_diff: float
 
 app = FastAPI()
 proc = DataProcessor()
@@ -106,7 +108,9 @@ async def process_and_save_all(db: Session = Depends(get_db)):
     targets = {
         "elonmusk": "TSLA",
         "tim_cook": "AAPL",
-        "satyanadella": "MSFT"
+        "satyanadella": "MSFT",
+        "sundarpichai": "GOOGL",
+        "MichaelDell": "DELL"
     }
     
     total_records = 0
@@ -149,11 +153,14 @@ async def process_and_save_all(db: Session = Depends(get_db)):
 
                 stock_close = 0.0
                 stock_volume = 0.0
+                stock_open_close_diff = 0.0
                 if not stocks_df.empty:
                     valid_stocks = stocks_df[stocks_df['date_only'] >= target_date_only]
                     if not valid_stocks.empty:
                         stock_close = float(valid_stocks['close'].iloc[0])
                         stock_volume = float(valid_stocks['volume'].iloc[0])
+                        stock_open = float(valid_stocks['open'].iloc[0])
+                        stock_open_close_diff = float(stock_open - stock_close)
                 
                 new_record = MergedRecord(
                     date=tweet_date.isoformat(),
@@ -164,7 +171,8 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                     tone_category=get_tone_category(text, sentiment),
                     tweet_type=get_tweet_type(text),
                     stock_close=stock_close,
-                    stock_volume=stock_volume
+                    stock_volume=stock_volume,
+                    stock_open_close_diff=stock_open_close_diff
                 )
                 db.add(new_record)
                 total_records += 1
