@@ -34,6 +34,7 @@ def get_db():
 class TweetRecord(Base):
     __tablename__ = "tweets"
     id = Column(Integer, primary_key=True, index=True)
+    date = Column(String)
     ceo = Column(String)
     text = Column(String)
     sentiment_score = Column(Float)
@@ -70,6 +71,7 @@ Base.metadata.create_all(bind=engine)
 
 # --- PYDANTIC SCHEMAS ---
 class TweetSchema(BaseModel):
+    date: str
     ceo: str
     text: str
     sentiment_score: float

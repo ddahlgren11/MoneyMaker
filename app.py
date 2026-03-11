@@ -136,8 +136,12 @@ def fetch_stocks():
             st.error(f"Failed to fetch stock data: {str(e)}\n{traceback.format_exc()}")
 
 def fetch_merged():
-    if not ceo_handle or not stock_ticker:
-        st.error("Please enter both CEO Twitter Handle and Stock Ticker for merged data.")
+    current_ticker = stock_ticker
+    if ceo_handle and not current_ticker:
+        current_ticker = proc.ceo_map.get(ceo_handle, "")
+
+    if not ceo_handle or not current_ticker:
+        st.error("Please enter a CEO Twitter Handle and a Stock Ticker (or use a mapped CEO like elonmusk).")
         return
         
     with st.spinner("Pulling and merging data..."):
@@ -165,7 +169,7 @@ def fetch_merged():
             max_date = tweets_df['created_at'].max() + timedelta(days=5)
             
             # 2. Fetch Stock Data
-            stocks_df = proc.get_stocks(stock_ticker, start_date=min_date, end_date=max_date)
+            stocks_df = proc.get_stocks(current_ticker, start_date=min_date, end_date=max_date)
 
             if not stocks_df.empty:
                 if isinstance(stocks_df.index, pd.MultiIndex):
@@ -210,6 +214,7 @@ def fetch_merged():
                     "refined_sentiment": get_refined_sentiment(sentiment),
                     "tone_category": get_tone_category(text, sentiment),
                     "tweet_type": get_tweet_type(text),
+                    "stock_ticker": current_ticker,
                     "stock_close": stock_close,
                     "stock_volume": stock_volume,
                     "stock_open_close_diff": stock_open_close_diff
@@ -218,10 +223,11 @@ def fetch_merged():
             merged_df = pd.DataFrame(merged_data)
             
             with results_container:
-                st.subheader(f"Merged Data (@{ceo_handle} & {stock_ticker.upper()}) ({selected_week['display']})")
+                st.subheader(f"Merged Data (@{ceo_handle} & {current_ticker.upper()}) ({selected_week['display']})")
                 if merged_df.empty:
                     st.info("No merged data found.")
                 else:
+                    # ensure stock_ticker is visible in the DataFrame output
                     st.dataframe(merged_df, use_container_width=True)
                     
         except Exception as e:
