@@ -64,31 +64,32 @@ def fetch_tweets():
         try:
             tweets_df = run_async(proc.get_tweets(ceo_handle))
             
-            if not tweets_df.empty and 'created_at' in tweets_df.columns:
+            if not tweets_df.empty and 'date' in tweets_df.columns:
                 # Filter by selected dates
                 # Ensure tz-awareness matches
-                if tweets_df['created_at'].dt.tz is None:
-                    tweets_df['created_at'] = tweets_df['created_at'].dt.tz_localize('UTC')
+                if tweets_df['date'].dt.tz is None:
+                    tweets_df['date'] = tweets_df['date'].dt.tz_localize('UTC')
                     
                 start_date = pd.to_datetime(query_start_date).tz_localize('UTC')
-                mask = (tweets_df['created_at'] >= start_date)
+                mask = (tweets_df['date'] >= start_date)
 
                 if query_end_date:
                     end_date = pd.to_datetime(query_end_date).tz_localize('UTC') + timedelta(days=1) # Include full end day
-                    mask = mask & (tweets_df['created_at'] < end_date)
+                    mask = mask & (tweets_df['date'] < end_date)
                 
                 filtered_tweets = tweets_df.loc[mask].copy()
+                filtered_tweets = filtered_tweets.sort_values(by='date', ascending=False)
                 
                 # Format datetime for display
-                if 'created_at' in filtered_tweets.columns:
-                    filtered_tweets['created_at'] = filtered_tweets['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                if 'date' in filtered_tweets.columns:
+                    filtered_tweets['date'] = filtered_tweets['date'].dt.strftime('%Y-%m-%d %H:%M:%S')
                     
                 with results_container:
                     st.subheader(f"Tweets for @{ceo_handle} ({date_display})")
                     if filtered_tweets.empty:
                         st.info("No tweets found for this date range.")
                     else:
-                        st.dataframe(filtered_tweets[['ceo', 'created_at', 'text', 'sentiment']], use_container_width=True)
+                        st.dataframe(filtered_tweets[['ceo', 'date', 'text', 'sentiment']], use_container_width=True)
             else:
                 with results_container:
                     st.info("No tweets found.")
@@ -143,16 +144,16 @@ def fetch_merged():
             tweets_df = run_async(proc.get_tweets(ceo_handle))
             
             # Filter tweets by selected dates
-            if not tweets_df.empty and 'created_at' in tweets_df.columns:
-                if tweets_df['created_at'].dt.tz is None:
-                    tweets_df['created_at'] = tweets_df['created_at'].dt.tz_localize('UTC')
+            if not tweets_df.empty and 'date' in tweets_df.columns:
+                if tweets_df['date'].dt.tz is None:
+                    tweets_df['date'] = tweets_df['date'].dt.tz_localize('UTC')
 
                 start_date = pd.to_datetime(query_start_date).tz_localize('UTC')
-                mask = (tweets_df['created_at'] >= start_date)
+                mask = (tweets_df['date'] >= start_date)
 
                 if query_end_date:
                     end_date = pd.to_datetime(query_end_date).tz_localize('UTC') + timedelta(days=1)
-                    mask = mask & (tweets_df['created_at'] < end_date)
+                    mask = mask & (tweets_df['date'] < end_date)
 
                 tweets_df = tweets_df.loc[mask].copy()
 
@@ -162,8 +163,8 @@ def fetch_merged():
                 return
 
             # Calculate date range with padding for weekends/holidays for stocks
-            min_date = tweets_df['created_at'].min() - timedelta(days=5)
-            max_date = tweets_df['created_at'].max() + timedelta(days=5)
+            min_date = tweets_df['date'].min() - timedelta(days=5)
+            max_date = tweets_df['date'].max() + timedelta(days=5)
             
             # 2. Fetch Stock Data
             stocks_df = proc.get_stocks(current_ticker, start_date=min_date, end_date=max_date)
@@ -181,7 +182,7 @@ def fetch_merged():
             for _, row in tweets_df.iterrows():
                 sentiment = float(row['sentiment'])
                 text = str(row['text'])
-                tweet_date = row['created_at']
+                tweet_date = row['date']
 
                 # Match weekend tweets to following Monday
                 target_date = tweet_date
@@ -218,6 +219,8 @@ def fetch_merged():
                 })
             
             merged_df = pd.DataFrame(merged_data)
+            if not merged_df.empty:
+                merged_df = merged_df.sort_values(by='date', ascending=False)
             
             with results_container:
                 st.subheader(f"Merged Data (@{ceo_handle} & {current_ticker.upper()}) ({date_display})")
