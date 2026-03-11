@@ -20,29 +20,6 @@ def get_processor():
 
 proc = get_processor()
 
-# Generate a list of recent weeks (e.g., past 12 weeks)
-def get_recent_weeks(num_weeks=12):
-    weeks = []
-    # Start from today, get the current week's monday
-    today = datetime.now(pytz.utc)
-    current_monday = today - timedelta(days=today.weekday())
-    
-    for i in range(num_weeks):
-        start_of_week = current_monday - timedelta(weeks=i)
-        end_of_week = start_of_week + timedelta(days=6)
-        
-        # Format for display: "YYYY-MM-DD to YYYY-MM-DD"
-        display_str = f"{start_of_week.strftime('%Y-%m-%d')} to {end_of_week.strftime('%Y-%m-%d')}"
-        weeks.append({
-            "display": display_str,
-            "start": start_of_week,
-            "end": end_of_week
-        })
-    return weeks
-
-recent_weeks = get_recent_weeks(12)
-week_displays = [w["display"] for w in recent_weeks]
-
 # UI Query Parameters
 st.subheader("Data Query Parameters")
 col1, col2 = st.columns(2)
@@ -51,8 +28,17 @@ with col1:
 with col2:
     stock_ticker = st.text_input("Stock Ticker", value="", placeholder="e.g. TSLA")
 
-selected_week_display = st.selectbox("Select Week", options=week_displays)
-selected_week = next(w for w in recent_weeks if w["display"] == selected_week_display)
+col3, col4 = st.columns(2)
+with col3:
+    query_start_date = st.date_input("Start Date", value=datetime.now(pytz.utc).date() - timedelta(days=7))
+with col4:
+    query_end_date = st.date_input("End Date (Optional)", value=None)
+
+# For displaying the selected range in subheaders
+if query_end_date:
+    date_display = f"{query_start_date.strftime('%Y-%m-%d')} to {query_end_date.strftime('%Y-%m-%d')}"
+else:
+    date_display = f"From {query_start_date.strftime('%Y-%m-%d')}"
 
 # Define async execution helper
 def run_async(coro):
@@ -79,15 +65,18 @@ def fetch_tweets():
             tweets_df = run_async(proc.get_tweets(ceo_handle))
             
             if not tweets_df.empty and 'created_at' in tweets_df.columns:
-                # Filter by selected week
+                # Filter by selected dates
                 # Ensure tz-awareness matches
                 if tweets_df['created_at'].dt.tz is None:
                     tweets_df['created_at'] = tweets_df['created_at'].dt.tz_localize('UTC')
                     
-                start_date = pd.to_datetime(selected_week["start"])
-                end_date = pd.to_datetime(selected_week["end"]) + timedelta(days=1) # Include full end day
+                start_date = pd.to_datetime(query_start_date).tz_localize('UTC')
+                mask = (tweets_df['created_at'] >= start_date)
+
+                if query_end_date:
+                    end_date = pd.to_datetime(query_end_date).tz_localize('UTC') + timedelta(days=1) # Include full end day
+                    mask = mask & (tweets_df['created_at'] < end_date)
                 
-                mask = (tweets_df['created_at'] >= start_date) & (tweets_df['created_at'] < end_date)
                 filtered_tweets = tweets_df.loc[mask].copy()
                 
                 # Format datetime for display
@@ -95,9 +84,9 @@ def fetch_tweets():
                     filtered_tweets['created_at'] = filtered_tweets['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
                     
                 with results_container:
-                    st.subheader(f"Tweets for @{ceo_handle} ({selected_week['display']})")
+                    st.subheader(f"Tweets for @{ceo_handle} ({date_display})")
                     if filtered_tweets.empty:
-                        st.info("No tweets found for this week.")
+                        st.info("No tweets found for this date range.")
                     else:
                         st.dataframe(filtered_tweets[['ceo', 'created_at', 'text', 'sentiment']], use_container_width=True)
             else:
@@ -114,10 +103,14 @@ def fetch_stocks():
     with st.spinner(f"Pulling stock data for {stock_ticker.upper()}..."):
         try:
             # Add padding to start/end dates for API to find data reliably
-            start_date = selected_week["start"] - timedelta(days=2)
-            end_date = selected_week["end"] + timedelta(days=2)
+            # Need datetime, not date
+            start_dt = datetime.combine(query_start_date, datetime.min.time()).replace(tzinfo=pytz.utc) - timedelta(days=2)
+            if query_end_date:
+                end_dt = datetime.combine(query_end_date, datetime.max.time()).replace(tzinfo=pytz.utc) + timedelta(days=2)
+            else:
+                end_dt = None
             
-            stocks_df = proc.get_stocks(stock_ticker, start_date=start_date, end_date=end_date)
+            stocks_df = proc.get_stocks(stock_ticker, start_date=start_dt, end_date=end_dt)
             
             if not stocks_df.empty:
                 stocks_df = stocks_df.reset_index()
@@ -127,11 +120,11 @@ def fetch_stocks():
                     stocks_df['timestamp'] = stocks_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
                     
                 with results_container:
-                    st.subheader(f"Stock Data for {stock_ticker.upper()} ({selected_week['display']})")
+                    st.subheader(f"Stock Data for {stock_ticker.upper()} ({date_display})")
                     st.dataframe(stocks_df[['timestamp', 'open', 'high', 'low', 'close', 'volume', 'trade_count', 'vwap']], use_container_width=True)
             else:
                 with results_container:
-                    st.info("No stock data found for this week.")
+                    st.info("No stock data found for this date range.")
         except Exception as e:
             st.error(f"Failed to fetch stock data: {str(e)}\n{traceback.format_exc()}")
 
@@ -149,19 +142,23 @@ def fetch_merged():
             # 1. Fetch Tweets
             tweets_df = run_async(proc.get_tweets(ceo_handle))
             
-            # Filter tweets by selected week
-            start_date = pd.to_datetime(selected_week["start"])
-            end_date = pd.to_datetime(selected_week["end"]) + timedelta(days=1)
-            
+            # Filter tweets by selected dates
             if not tweets_df.empty and 'created_at' in tweets_df.columns:
                 if tweets_df['created_at'].dt.tz is None:
                     tweets_df['created_at'] = tweets_df['created_at'].dt.tz_localize('UTC')
-                mask = (tweets_df['created_at'] >= start_date) & (tweets_df['created_at'] < end_date)
+
+                start_date = pd.to_datetime(query_start_date).tz_localize('UTC')
+                mask = (tweets_df['created_at'] >= start_date)
+
+                if query_end_date:
+                    end_date = pd.to_datetime(query_end_date).tz_localize('UTC') + timedelta(days=1)
+                    mask = mask & (tweets_df['created_at'] < end_date)
+
                 tweets_df = tweets_df.loc[mask].copy()
 
             if tweets_df.empty:
                 with results_container:
-                    st.info("No tweets found for this week to merge.")
+                    st.info("No tweets found for this date range to merge.")
                 return
 
             # Calculate date range with padding for weekends/holidays for stocks
@@ -223,7 +220,7 @@ def fetch_merged():
             merged_df = pd.DataFrame(merged_data)
             
             with results_container:
-                st.subheader(f"Merged Data (@{ceo_handle} & {current_ticker.upper()}) ({selected_week['display']})")
+                st.subheader(f"Merged Data (@{ceo_handle} & {current_ticker.upper()}) ({date_display})")
                 if merged_df.empty:
                     st.info("No merged data found.")
                 else:
