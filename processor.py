@@ -29,7 +29,7 @@ class DataProcessor:
                 'ceo': username,
                 'text': tweet.text,
                 'sentiment': analysis.sentiment.polarity,
-                'created_at': tweet.created_on
+                'date': tweet.created_on
             })
         return pd.DataFrame(all_tweets)
 

@@ -128,9 +128,11 @@ async def process_and_save_all(db: Session = Depends(get_db)):
             if tweets_df.empty:
                 continue
 
+            tweets_df = tweets_df.sort_values(by='date', ascending=False)
+
             # Calculate date range with padding for weekends/holidays
-            min_date = tweets_df['created_at'].min() - timedelta(days=5)
-            max_date = tweets_df['created_at'].max() + timedelta(days=5)
+            min_date = tweets_df['date'].min() - timedelta(days=5)
+            max_date = tweets_df['date'].max() + timedelta(days=5)
             
             # 2. Fetch Stock Data for the associated ticker
             stocks_df = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
@@ -146,7 +148,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
             for _, row in tweets_df.iterrows():
                 sentiment = float(row['sentiment'])
                 text = str(row['text'])
-                tweet_date = row['created_at']
+                tweet_date = row['date']
 
                 # Match weekend tweets to following Monday
                 target_date = tweet_date
@@ -219,9 +221,11 @@ async def api_get_tweets(ceo: str):
         if tweets_df.empty:
             return {"status": "success", "data": []}
 
+        tweets_df = tweets_df.sort_values(by='date', ascending=False)
+
         # Convert timestamp to string for JSON serialization
-        if 'created_at' in tweets_df.columns:
-            tweets_df['created_at'] = tweets_df['created_at'].astype(str)
+        if 'date' in tweets_df.columns:
+            tweets_df['date'] = tweets_df['date'].astype(str)
 
         return {"status": "success", "data": tweets_df.to_dict(orient='records')}
     except Exception as e:
@@ -251,9 +255,11 @@ async def api_get_merged(ceo: str, ticker: str):
         if tweets_df.empty:
             return {"status": "success", "data": []}
 
+        tweets_df = tweets_df.sort_values(by='date', ascending=False)
+
         # Calculate date range with padding for weekends/holidays
-        min_date = tweets_df['created_at'].min() - timedelta(days=5)
-        max_date = tweets_df['created_at'].max() + timedelta(days=5)
+        min_date = tweets_df['date'].min() - timedelta(days=5)
+        max_date = tweets_df['date'].max() + timedelta(days=5)
 
         # 2. Fetch Stock Data
         stocks_df = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
@@ -271,7 +277,7 @@ async def api_get_merged(ceo: str, ticker: str):
         for _, row in tweets_df.iterrows():
             sentiment = float(row['sentiment'])
             text = str(row['text'])
-            tweet_date = row['created_at']
+            tweet_date = row['date']
 
             # Match weekend tweets to following Monday
             target_date = tweet_date

@@ -181,7 +181,7 @@
 
                 const container = document.getElementById('resultsContainer');
                 container.innerHTML = `<h3 class="mb-3">Tweets for @${escapeHtml(ceo)}</h3>` +
-                    createTable(['ceo', 'created_at', 'text', 'sentiment'], data.data);
+                    createTable(['ceo', 'date', 'text', 'sentiment'], data.data);
             } catch (e) {
                 displayError("Failed to fetch tweets: " + e.message);
             } finally {
