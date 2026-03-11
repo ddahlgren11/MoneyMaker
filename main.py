@@ -58,6 +58,7 @@ class MergedRecord(Base):
     refined_sentiment = Column(String)
     tone_category = Column(String)
     tweet_type = Column(String)
+    stock_ticker = Column(String)
     stock_close = Column(Float)
     stock_volume = Column(Float)
     stock_open_close_diff = Column(Float)
@@ -89,6 +90,7 @@ class MergedSchema(BaseModel):
     refined_sentiment: str
     tone_category: str
     tweet_type: str
+    stock_ticker: str
     close: float
     volume: float
     open_close_diff: float
@@ -170,6 +172,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                     refined_sentiment=get_refined_sentiment(sentiment),
                     tone_category=get_tone_category(text, sentiment),
                     tweet_type=get_tweet_type(text),
+                    stock_ticker=ticker,
                     stock_close=stock_close,
                     stock_volume=stock_volume,
                     stock_open_close_diff=stock_open_close_diff
