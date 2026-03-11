@@ -48,3 +48,6 @@ Follow these steps to start the API server locally:
    uvicorn main:app --reload
    ```
    The server will be running at `http://localhost:8000`. You can access the automatic interactive API documentation at `http://localhost:8000/docs`.
+
+   uvicorn main:app --reload
+   streamlit run app.py
