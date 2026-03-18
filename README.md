@@ -1,7 +1,17 @@
 # MoneyMaker Active Controller API
 
 ## Description
-This project is an API for fetching CEO tweets, analyzing their sentiment, correlating them with stock data, and saving the merged records to a database (PostgreSQL). It leverages FastAPI for the backend, Alpaca for stock data, and Tweety to fetch tweets.
+This project fetches CEO tweets, analyzes their sentiment, correlates them with their company's stock data, and saves the merged records to a database. It features a FastAPI backend for processing and a Streamlit frontend for viewing the data.
+
+## Tools Used
+- **FastAPI**: Backend API framework.
+- **Streamlit**: Frontend user interface.
+- **PostgreSQL**: Relational database for storing records.
+- **Tweety**: Fetching tweets from Twitter/X.
+- **TextBlob**: Sentiment analysis of the tweets.
+- **Alpaca**: Fetching correlated stock market data.
+- **SQLAlchemy**: ORM for database interactions.
+- **Pandas**: Data manipulation and merging.
 
 *(Note: The file `actualcapstone.ipynb` is a scratchpad/exploratory notebook and is not part of the active API structure.)*
 
