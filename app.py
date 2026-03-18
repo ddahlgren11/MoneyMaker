@@ -50,7 +50,7 @@ def run_async(coro):
     return loop.run_until_complete(coro)
 
 # Action Buttons
-col_btn1, col_btn2, col_btn3 = st.columns([1, 1, 1])
+col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([1, 1, 1, 1])
 
 # Container for results
 results_container = st.container()
@@ -128,6 +128,149 @@ def fetch_stocks():
                     st.info("No stock data found for this date range.")
         except Exception as e:
             st.error(f"Failed to fetch stock data: {str(e)}\n{traceback.format_exc()}")
+
+def fetch_atr_analysis():
+    current_ticker = stock_ticker
+    if ceo_handle and not current_ticker:
+        current_ticker = proc.ceo_map.get(ceo_handle, "")
+
+    if not ceo_handle or not current_ticker:
+        st.error("Please enter a CEO Twitter Handle and a Stock Ticker (or use a mapped CEO like elonmusk).")
+        return
+
+    with st.spinner("Running ATR Analysis..."):
+        try:
+            # 1. Fetch Tweets
+            tweets_df = run_async(proc.get_tweets(ceo_handle))
+
+            # Filter tweets by selected dates
+            if not tweets_df.empty and 'date' in tweets_df.columns:
+                if tweets_df['date'].dt.tz is None:
+                    tweets_df['date'] = tweets_df['date'].dt.tz_localize('UTC')
+
+                start_date = pd.to_datetime(query_start_date).tz_localize('UTC')
+                mask = (tweets_df['date'] >= start_date)
+
+                if query_end_date:
+                    end_date = pd.to_datetime(query_end_date).tz_localize('UTC') + timedelta(days=1)
+                    mask = mask & (tweets_df['date'] < end_date)
+
+                tweets_df = tweets_df.loc[mask].copy()
+
+            if tweets_df.empty:
+                with results_container:
+                    st.info("No tweets found for this date range to analyze.")
+                return
+
+            # Filter for high sentiment tweets
+            tweets_df = tweets_df[tweets_df['sentiment'] >= 0.5]
+
+            if tweets_df.empty:
+                with results_container:
+                    st.info("No high-sentiment tweets (>= 0.5) found in this date range.")
+                return
+
+            # Compute earliest date minus 40 days for 14-day rolling ATR calculation
+            min_date = tweets_df['date'].min() - timedelta(days=40)
+            max_date = tweets_df['date'].max() + timedelta(days=5)
+
+            # Fetch Stock Data
+            stocks_df = proc.get_stocks(current_ticker, start_date=min_date, end_date=max_date)
+
+            if stocks_df.empty:
+                with results_container:
+                    st.info("No stock data found to analyze.")
+                return
+
+            if isinstance(stocks_df.index, pd.MultiIndex):
+                stock_dates = stocks_df.index.get_level_values('timestamp').date
+            else:
+                stock_dates = stocks_df.index.date
+            stocks_df['date_only'] = stock_dates
+
+            # Calculate 14-day rolling ATR
+            stocks_df['prev_close'] = stocks_df['close'].shift(1)
+            stocks_df['tr1'] = stocks_df['high'] - stocks_df['low']
+            stocks_df['tr2'] = abs(stocks_df['high'] - stocks_df['prev_close'])
+            stocks_df['tr3'] = abs(stocks_df['low'] - stocks_df['prev_close'])
+            stocks_df['true_range'] = stocks_df[['tr1', 'tr2', 'tr3']].max(axis=1)
+            stocks_df['atr_14'] = stocks_df['true_range'].rolling(window=14).mean()
+
+            atr_results = []
+
+            # Process and merge each high sentiment tweet
+            for _, row in tweets_df.iterrows():
+                sentiment = float(row['sentiment'])
+                text = str(row['text'])
+                tweet_date = row['date']
+
+                # Match weekend tweets to following Monday
+                target_date = tweet_date
+                if target_date.weekday() == 5:  # Saturday
+                    target_date += timedelta(days=2)
+                elif target_date.weekday() == 6:  # Sunday
+                    target_date += timedelta(days=1)
+
+                target_date_only = target_date.date()
+
+                # Find valid stocks on or after the target date
+                valid_stocks = stocks_df[stocks_df['date_only'] >= target_date_only]
+                if not valid_stocks.empty and len(valid_stocks) >= 2:
+                    target_stock = valid_stocks.iloc[0]
+                    next_day_stock = valid_stocks.iloc[1]
+
+                    stock_close_target = float(target_stock['close'])
+                    stock_close_next = float(next_day_stock['close'])
+
+                    # Next-day price change
+                    price_change = abs(stock_close_next - stock_close_target)
+
+                    # ATR on target date
+                    atr = target_stock['atr_14']
+                    if pd.isna(atr):
+                        continue
+
+                    exceeded_atr = price_change > atr
+
+                    atr_results.append({
+                        "date": tweet_date.strftime('%Y-%m-%d %H:%M:%S'),
+                        "target_date": target_stock['date_only'].strftime('%Y-%m-%d'),
+                        "tweet_text": text,
+                        "sentiment_score": sentiment,
+                        "stock_ticker": current_ticker,
+                        "close_target": stock_close_target,
+                        "close_next": stock_close_next,
+                        "price_change": price_change,
+                        "atr_14": atr,
+                        "exceeded_atr": "Yes" if exceeded_atr else "No"
+                    })
+
+            results_df = pd.DataFrame(atr_results)
+
+            with results_container:
+                st.subheader(f"ATR Analysis (@{ceo_handle} & {current_ticker.upper()}) ({date_display})")
+
+                if results_df.empty:
+                    st.info("No valid market data overlapping with high sentiment tweets could be analyzed.")
+                    return
+
+                # Display Results Table
+                st.dataframe(results_df, use_container_width=True)
+
+                # Prepare Visualization
+                viz_df = results_df[['date', 'price_change', 'atr_14']].copy()
+                viz_df.set_index('date', inplace=True)
+
+                st.subheader("Price Change vs ATR (14-day)")
+                st.bar_chart(viz_df)
+
+                # Summary Statistics
+                total = len(results_df)
+                exceeded_count = len(results_df[results_df['exceeded_atr'] == 'Yes'])
+                st.write(f"**Summary**: Out of {total} high-sentiment tweets, the subsequent next-day stock price change exceeded the rolling 14-day ATR {exceeded_count} times.")
+
+        except Exception as e:
+            st.error(f"Failed to fetch and analyze ATR data: {str(e)}\n{traceback.format_exc()}")
 
 def fetch_merged():
     current_ticker = stock_ticker
@@ -244,3 +387,7 @@ with col_btn2:
 with col_btn3:
     if st.button("Pull Merged Data", type="primary", use_container_width=True):
         fetch_merged()
+
+with col_btn4:
+    if st.button("Run ATR Analysis", type="primary", use_container_width=True):
+        fetch_atr_analysis()
