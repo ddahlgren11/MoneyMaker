@@ -53,7 +53,9 @@ def run_async(coro):
 col_btn1, col_btn2, col_btn3, col_btn4 = st.columns([1, 1, 1, 1])
 
 # Container for results
-results_container = st.container()
+tab_data, tab_viz = st.tabs(["Data Viewer", "Visualizations"])
+results_container = tab_data.container()
+viz_container = tab_viz.container()
 
 def fetch_tweets():
     if not ceo_handle:
@@ -123,6 +125,13 @@ def fetch_stocks():
                 with results_container:
                     st.subheader(f"Stock Data for {stock_ticker.upper()} ({date_display})")
                     st.dataframe(stocks_df[['timestamp', 'open', 'high', 'low', 'close', 'volume', 'trade_count', 'vwap']], use_container_width=True)
+
+                with viz_container:
+                    st.subheader(f"Stock Price for {stock_ticker.upper()} ({date_display})")
+                    chart_data = stocks_df[['timestamp', 'close']].copy()
+                    chart_data['timestamp'] = pd.to_datetime(chart_data['timestamp'])
+                    chart_data.set_index('timestamp', inplace=True)
+                    st.line_chart(chart_data)
             else:
                 with results_container:
                     st.info("No stock data found for this date range.")
@@ -261,8 +270,9 @@ def fetch_atr_analysis():
                 viz_df = results_df[['date', 'price_change', 'atr_14']].copy()
                 viz_df.set_index('date', inplace=True)
 
-                st.subheader("Price Change vs ATR (14-day)")
-                st.bar_chart(viz_df)
+                with viz_container:
+                    st.subheader(f"Price Change vs ATR (14-day) (@{ceo_handle} & {current_ticker.upper()})")
+                    st.bar_chart(viz_df)
 
                 # Summary Statistics
                 total = len(results_df)
