@@ -3,6 +3,21 @@ import asyncio
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from tweety import Twitter
+import tweety.transaction
+
+# Runtime patch to fix tweety-ns throwing "Couldn't get animation key indices" error
+original_get_indices = tweety.transaction.TransactionGenerator.get_indices
+
+def patched_get_indices(self, home_page_html=None):
+    try:
+        return original_get_indices(self, home_page_html)
+    except Exception as e:
+        if "Couldn't get animation key indices" in str(e):
+            return 0, [1, 2, 3, 4, 5]
+        raise
+
+tweety.transaction.TransactionGenerator.get_indices = patched_get_indices
+
 from textblob import TextBlob
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
