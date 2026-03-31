@@ -131,11 +131,9 @@ def fetch_stocks():
 
 def fetch_atr_analysis():
     current_ticker = stock_ticker
-    if ceo_handle and not current_ticker:
-        current_ticker = proc.ceo_map.get(ceo_handle, "")
 
     if not ceo_handle or not current_ticker:
-        st.error("Please enter a CEO Twitter Handle and a Stock Ticker (or use a mapped CEO like elonmusk).")
+        st.error("Please enter a CEO Twitter Handle and a Stock Ticker.")
         return
 
     with st.spinner("Running ATR Analysis..."):
@@ -274,11 +272,9 @@ def fetch_atr_analysis():
 
 def fetch_merged():
     current_ticker = stock_ticker
-    if ceo_handle and not current_ticker:
-        current_ticker = proc.ceo_map.get(ceo_handle, "")
 
     if not ceo_handle or not current_ticker:
-        st.error("Please enter a CEO Twitter Handle and a Stock Ticker (or use a mapped CEO like elonmusk).")
+        st.error("Please enter a CEO Twitter Handle and a Stock Ticker.")
         return
         
     with st.spinner("Pulling and merging data..."):

@@ -33,7 +33,6 @@ class DataProcessor:
             os.getenv("ALPACA_API_KEY"), 
             os.getenv("ALPACA_SECRET_KEY")
         )
-        self.ceo_map = {"elonmusk": "TSLA", "tim_cook": "AAPL", "satyanadella": "MSFT", "sundarpichai": "GOOGL", "MichaelDell": "DELL"}
 
     async def get_tweets(self, username):
         all_tweets = []
