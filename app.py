@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import asyncio
 import pandas as pd
@@ -10,6 +11,9 @@ import traceback
 from processor import DataProcessor
 from classifier import get_refined_sentiment, get_tone_category, get_tweet_type
 from context import get_earnings_dates, get_news_for_range, get_sector_etf
+from sqlalchemy import create_engine, text
+from dotenv import load_dotenv
+load_dotenv()
 
 st.set_page_config(page_title="MoneyMaker", layout="wide", page_icon="📈")
 
@@ -204,6 +208,25 @@ st.markdown("""
 def get_processor():
     return DataProcessor()
 
+@st.cache_resource
+def get_db_engine():
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        return None
+    return create_engine(url)
+
+@st.cache_data(ttl=300)
+def load_dashboard_data():
+    engine = get_db_engine()
+    if engine is None:
+        return None
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(text("SELECT * FROM merged_data"), conn)
+        return df if not df.empty else None
+    except Exception:
+        return None
+
 proc = get_processor()
 
 # Shared inputs — visible on every tab
@@ -251,7 +274,101 @@ def weekend_shift(dt):
     return dt
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_data, tab_atr, tab_impact, tab_trend, tab_stock, tab_drill, tab_ctx = st.tabs(["Data", "ATR Analysis", "Tweet Impact", "Post-Tweet Trend", "Stock Analysis", "Tweet Explorer", "Market Context"])
+tab_home, tab_data, tab_atr, tab_impact, tab_trend, tab_stock, tab_drill, tab_ctx = st.tabs(["Home", "Data", "ATR Analysis", "Tweet Impact", "Post-Tweet Trend", "Stock Analysis", "Tweet Explorer", "Market Context"])
+
+# ── HOME TAB ──────────────────────────────────────────────────────────────────
+with tab_home:
+    db_data = load_dashboard_data()
+
+    if db_data is None:
+        # ── Getting started ───────────────────────────────────────────────────
+        st.markdown("### Welcome to MoneyMaker")
+        st.markdown("Your database is empty. Run `/process/all` from the FastAPI backend to populate it, or use the tabs below to start exploring manually.")
+        st.markdown("---")
+        features = [
+            ("Data", "Pull raw tweets, stock prices, and merged data for any CEO and ticker."),
+            ("ATR Analysis", "See whether high-sentiment tweet days coincide with unusual stock volatility."),
+            ("Tweet Impact", "Measure same-day stock reaction on days a CEO posted a high-sentiment tweet."),
+            ("Post-Tweet Trend", "Track how a stock drifts over N trading days after a tweet on a radar chart."),
+            ("Stock Analysis", "Full candlestick chart with RSI, MACD, Bollinger Bands, and moving averages."),
+            ("Tweet Explorer", "Select any tweet and see the stock chart around that exact date."),
+            ("Market Context", "Compare stock performance vs SPY and sector ETFs, with earnings and news overlaid."),
+        ]
+        cols = st.columns(2)
+        for i, (name, desc) in enumerate(features):
+            with cols[i % 2]:
+                st.markdown(f"""
+                <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:10px;padding:1rem;margin-bottom:0.75rem;">
+                    <div style="color:#ff5c5c;font-weight:700;font-size:0.9rem;margin-bottom:0.25rem;">{name}</div>
+                    <div style="color:#c0cfe8;font-size:0.82rem;">{desc}</div>
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        # ── Stats ─────────────────────────────────────────────────────────────
+        total_records = len(db_data)
+        unique_ceos = db_data['ceo'].nunique()
+        avg_sentiment = db_data['sentiment_score'].mean()
+        top_ceo = db_data['ceo'].value_counts().idxmax()
+        top_ceo_count = db_data['ceo'].value_counts().max()
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total Tweets Analyzed", f"{total_records:,}")
+        m2.metric("CEOs Tracked", str(unique_ceos))
+        m3.metric("Avg Sentiment Score", f"{avg_sentiment:.3f}")
+        m4.metric("Most Analyzed CEO", f"@{top_ceo}", f"{top_ceo_count} tweets")
+
+        st.markdown("---")
+
+        # ── Charts ────────────────────────────────────────────────────────────
+        chart_col1, chart_col2 = st.columns(2)
+
+        with chart_col1:
+            st.subheader("Tweets by CEO")
+            tweet_counts = db_data['ceo'].value_counts().reset_index()
+            tweet_counts.columns = ['ceo', 'count']
+            fig_counts = go.Figure(go.Bar(
+                x=tweet_counts['ceo'], y=tweet_counts['count'],
+                marker_color='#ff5c5c', text=tweet_counts['count'],
+                textposition='outside',
+            ))
+            fig_counts.update_layout(
+                template='plotly_dark', height=300,
+                margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor='#1a1f2e', plot_bgcolor='#1a1f2e',
+                yaxis=dict(gridcolor='#2a3a55'),
+            )
+            st.plotly_chart(fig_counts, use_container_width=True)
+
+        with chart_col2:
+            st.subheader("Avg Sentiment by CEO")
+            avg_by_ceo = db_data.groupby('ceo')['sentiment_score'].mean().reset_index()
+            avg_by_ceo.columns = ['ceo', 'avg_sentiment']
+            avg_by_ceo = avg_by_ceo.sort_values('avg_sentiment', ascending=False)
+            bar_colors = ['#ff5c5c' if v >= 0 else '#ef5350' for v in avg_by_ceo['avg_sentiment']]
+            fig_sent = go.Figure(go.Bar(
+                x=avg_by_ceo['ceo'], y=avg_by_ceo['avg_sentiment'],
+                marker_color=bar_colors,
+                text=avg_by_ceo['avg_sentiment'].round(3),
+                textposition='outside',
+            ))
+            fig_sent.update_layout(
+                template='plotly_dark', height=300,
+                margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor='#1a1f2e', plot_bgcolor='#1a1f2e',
+                yaxis=dict(gridcolor='#2a3a55'),
+            )
+            st.plotly_chart(fig_sent, use_container_width=True)
+
+        st.markdown("---")
+
+        # ── Top tweets ────────────────────────────────────────────────────────
+        st.subheader("Top 5 Most Positive Tweets")
+        top_positive = db_data.nlargest(5, 'sentiment_score')[['date', 'ceo', 'tweet_text', 'sentiment_score', 'stock_ticker']].reset_index(drop=True)
+        st.dataframe(top_positive, use_container_width=True)
+
+        st.subheader("Top 5 Most Negative Tweets")
+        top_negative = db_data.nsmallest(5, 'sentiment_score')[['date', 'ceo', 'tweet_text', 'sentiment_score', 'stock_ticker']].reset_index(drop=True)
+        st.dataframe(top_negative, use_container_width=True)
 
 # ── DATA TAB ──────────────────────────────────────────────────────────────────
 with tab_data:
