@@ -18,7 +18,7 @@ def patched_get_indices(self, home_page_html=None):
 
 tweety.transaction.TransactionGenerator.get_indices = patched_get_indices
 
-from textblob import TextBlob
+from classifier import get_sentiment_score
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -30,7 +30,7 @@ class DataProcessor:
     def __init__(self):
         self.twitter_client = Twitter("session")
         self.stock_client = StockHistoricalDataClient(
-            os.getenv("ALPACA_API_KEY"), 
+            os.getenv("ALPACA_API_KEY"),
             os.getenv("ALPACA_SECRET_KEY")
         )
 
@@ -38,17 +38,15 @@ class DataProcessor:
         all_tweets = []
         user_tweets = await self.twitter_client.get_tweets(username, pages=2)
         for tweet in user_tweets:
-            analysis = TextBlob(tweet.text)
             all_tweets.append({
                 'ceo': username,
                 'text': tweet.text,
-                'sentiment': analysis.sentiment.polarity,
+                'sentiment': get_sentiment_score(tweet.text),
                 'date': tweet.created_on
             })
         return pd.DataFrame(all_tweets)
 
     def get_stocks(self, symbol, start_date=None, end_date=None):
-        # Fetching data from 1 day ago to avoid SIP restrictions if not provided
         if end_date is None:
             end_date = datetime.now(timezone.utc) - timedelta(days=1)
         if start_date is None:

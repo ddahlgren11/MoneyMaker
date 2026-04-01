@@ -6,8 +6,9 @@ psycopg2-binary
 pydantic
 python-dotenv
 pandas 
-tweety-ns 
-textblob 
+tweety-ns
+vaderSentiment
 alpaca-py 
 streamlit
+plotly
 pytz

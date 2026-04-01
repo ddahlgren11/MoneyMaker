@@ -1,4 +1,9 @@
-from textblob import TextBlob
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+_analyzer = SentimentIntensityAnalyzer()
+
+def get_sentiment_score(text):
+    return _analyzer.polarity_scores(text)['compound']
 
 def get_refined_sentiment(score):
     if score <= -0.6: return 'Very Negative'
