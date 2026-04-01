@@ -2,15 +2,203 @@ import streamlit as st
 import asyncio
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from datetime import timedelta, datetime
 import pytz
 import traceback
 
 from processor import DataProcessor
 from classifier import get_refined_sentiment, get_tone_category, get_tweet_type
+from context import get_earnings_dates, get_news_for_range, get_sector_etf
 
 st.set_page_config(page_title="MoneyMaker", layout="wide", page_icon="📈")
-st.title("MoneyMaker")
+
+st.markdown("""
+<style>
+/* ── Base ── */
+.stApp {
+    background-color: #12161f;
+    color: #e0e6f0;
+}
+
+/* ── Header ── */
+.app-header {
+    padding: 1.5rem 0 1rem 0;
+    border-bottom: 1px solid #2a3a55;
+    margin-bottom: 1.5rem;
+}
+.app-header h1 {
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    background: linear-gradient(90deg, #ff5c5c, #ff8c5c);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin: 0;
+}
+.app-header p {
+    color: #8a9bbf;
+    font-size: 0.85rem;
+    margin: 0.25rem 0 0 0;
+}
+
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"] {
+    background-color: #1a1f2e;
+    border-radius: 10px;
+    padding: 4px;
+    gap: 2px;
+    border: 1px solid #2a3a55;
+}
+.stTabs [data-baseweb="tab"] {
+    background-color: transparent;
+    border-radius: 8px;
+    color: #8a9bbf;
+    font-weight: 500;
+    font-size: 0.82rem;
+    padding: 6px 14px;
+    border: none;
+}
+.stTabs [aria-selected="true"] {
+    background-color: #ff5c5c18 !important;
+    color: #ff5c5c !important;
+    border-bottom: 2px solid #ff5c5c !important;
+}
+.stTabs [data-baseweb="tab"]:hover {
+    color: #c0cfe8 !important;
+    background-color: #2a3a5530 !important;
+}
+
+/* ── Buttons ── */
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #ff5c5c, #ff8c5c);
+    color: #000;
+    font-weight: 700;
+    border: none;
+    border-radius: 8px;
+    padding: 0.5rem 1.5rem;
+    transition: opacity 0.2s;
+}
+.stButton > button[kind="primary"]:hover {
+    opacity: 0.85;
+    color: #000;
+}
+.stButton > button[kind="secondary"] {
+    border: 1px solid #2a3a55;
+    background-color: #1a1f2e;
+    color: #c0cfe8;
+    border-radius: 8px;
+}
+
+/* ── Metrics ── */
+[data-testid="metric-container"] {
+    background-color: #1a2235;
+    border: 1px solid #2a3a55;
+    border-radius: 10px;
+    padding: 1rem;
+}
+[data-testid="metric-container"] label {
+    color: #8a9bbf !important;
+    font-size: 0.75rem !important;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+[data-testid="metric-container"] [data-testid="stMetricValue"] {
+    color: #e0e6f0 !important;
+    font-size: 1.4rem !important;
+    font-weight: 700;
+}
+[data-testid="metric-container"] [data-testid="stMetricDelta"] {
+    font-size: 0.85rem !important;
+}
+
+/* ── Inputs ── */
+.stTextInput > div > div > input,
+.stSelectbox > div > div,
+.stDateInput > div > div > input {
+    background-color: #1a1f2e !important;
+    border: 1px solid #2a3a55 !important;
+    border-radius: 8px !important;
+    color: #e0e6f0 !important;
+}
+.stTextInput > div > div > input:focus {
+    border-color: #ff5c5c !important;
+    box-shadow: 0 0 0 2px #ff5c5c22 !important;
+}
+
+/* ── Sliders ── */
+.stSlider [data-baseweb="slider"] div[role="slider"] {
+    background-color: #ff5c5c !important;
+}
+
+/* ── Dataframes ── */
+.stDataFrame {
+    border: 1px solid #2a3a55 !important;
+    border-radius: 10px !important;
+    overflow: hidden;
+}
+
+/* ── Expanders ── */
+.streamlit-expanderHeader {
+    background-color: #1a1f2e !important;
+    border: 1px solid #2a3a55 !important;
+    border-radius: 8px !important;
+    color: #c0cfe8 !important;
+    font-weight: 600;
+}
+.streamlit-expanderContent {
+    background-color: #12161f !important;
+    border: 1px solid #2a3a55 !important;
+    border-top: none !important;
+    border-radius: 0 0 8px 8px !important;
+}
+
+/* ── Info / Success / Warning boxes ── */
+.stInfo, [data-testid="stInfoMessage"] {
+    background-color: #0f1f38 !important;
+    border-left: 3px solid #ff8c5c !important;
+    border-radius: 8px !important;
+}
+.stSuccess, [data-testid="stSuccessMessage"] {
+    background-color: #1f0a0a !important;
+    border-left: 3px solid #ff5c5c !important;
+    border-radius: 8px !important;
+}
+.stWarning, [data-testid="stWarningMessage"] {
+    background-color: #1f1a0a !important;
+    border-left: 3px solid #FF9800 !important;
+    border-radius: 8px !important;
+}
+.stError, [data-testid="stErrorMessage"] {
+    background-color: #1f0a0a !important;
+    border-left: 3px solid #ef5350 !important;
+    border-radius: 8px !important;
+}
+
+/* ── Section dividers ── */
+hr {
+    border-color: #2a3a55 !important;
+}
+
+/* ── Subheaders ── */
+h2, h3 {
+    color: #c0cfe8 !important;
+    font-weight: 700;
+}
+
+/* ── Spinner ── */
+.stSpinner > div {
+    border-top-color: #ff5c5c !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div class="app-header">
+    <h1>📈 MoneyMaker</h1>
+    <p>CEO tweet sentiment analysis & stock market correlation</p>
+</div>
+""", unsafe_allow_html=True)
 
 @st.cache_resource
 def get_processor():
@@ -63,7 +251,7 @@ def weekend_shift(dt):
     return dt
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_data, tab_atr, tab_impact, tab_trend = st.tabs(["Data", "ATR Analysis", "Tweet Impact", "Post-Tweet Trend"])
+tab_data, tab_atr, tab_impact, tab_trend, tab_stock, tab_drill, tab_ctx = st.tabs(["Data", "ATR Analysis", "Tweet Impact", "Post-Tweet Trend", "Stock Analysis", "Tweet Explorer", "Market Context"])
 
 # ── DATA TAB ──────────────────────────────────────────────────────────────────
 with tab_data:
@@ -590,3 +778,547 @@ with tab_trend:
 
                 except Exception as e:
                     st.error(f"Post-Tweet Trend analysis failed: {str(e)}\n{traceback.format_exc()}")
+
+# ── STOCK ANALYSIS TAB ────────────────────────────────────────────────────────
+with tab_stock:
+
+    with st.expander("📖 Glossary — click to learn what each term means"):
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown("""
+**Candlestick Chart**
+A visual way to see how a stock moved each day. Each "candle" shows where the price started, where it ended, and how high/low it went in between. 🟢 Green = the stock went up that day. 🔴 Red = it went down.
+
+**SMA — Simple Moving Average**
+Imagine averaging a student's last 20 test scores to get a sense of how they're really doing, ignoring one-off good or bad days. SMA does the same for a stock's price. If the price is above its average, things are generally trending up.
+
+**EMA — Exponential Moving Average**
+Same idea as SMA, but it pays more attention to what happened recently. Think of it like a coach who cares more about your last few games than games from months ago.
+
+**Bollinger Bands**
+Three lines drawn around the price — a middle line (the average) and an upper and lower boundary. When the price touches the top boundary, the stock might be getting too expensive too fast. Near the bottom boundary, it might be getting oversold. When the bands spread wide, the stock is moving a lot; when they're tight, it's calm.
+
+**Volume**
+Simply how many shares were bought and sold that day. If a stock jumps in price but barely anyone is trading it, that move might not last. A big price move with lots of trading behind it is more meaningful.
+""")
+        with g2:
+            st.markdown("""
+**RSI — Relative Strength Index**
+A speedometer for how fast a stock has been moving. It goes from 0 to 100. Above 70 means the stock has been rising very fast and might be due for a cooldown. Below 30 means it's been falling fast and might bounce back. Between 30–70 is the normal zone.
+
+**MACD**
+A way to spot when a stock's momentum is shifting. It compares two moving averages and shows when they cross each other — like watching two runners where one overtakes the other. When the MACD line crosses above the signal line, it's often seen as a good sign. Below is a warning sign.
+
+**Support Level**
+A price the stock keeps bouncing off of when it drops — like a floor. Buyers tend to step in at this price, so the stock rarely falls through it easily.
+
+**Resistance Level**
+The opposite of support — a price the stock keeps hitting but struggling to break through, like a ceiling. Sellers tend to show up here.
+
+**ATR — Average True Range**
+Measures how much a stock typically swings up and down in a normal day. A high ATR means the stock is jumpy and moves a lot. A low ATR means it's more stable and predictable.
+""")
+
+    st.markdown("---")
+
+    # Controls
+    ctrl1, ctrl2, ctrl3 = st.columns(3)
+    with ctrl1:
+        st.markdown("**Chart & Moving Averages**")
+        chart_type = st.radio("Chart type", ["Candlestick", "Line"], horizontal=True)
+        show_sma_20 = st.checkbox("SMA 20", value=True)
+        show_sma_50 = st.checkbox("SMA 50", value=True)
+        show_sma_200 = st.checkbox("SMA 200")
+        show_ema_12 = st.checkbox("EMA 12")
+        show_ema_26 = st.checkbox("EMA 26")
+    with ctrl2:
+        st.markdown("**Bollinger Bands**")
+        show_bb = st.checkbox("Show Bollinger Bands", value=True)
+        bb_period = st.slider("BB Period", 5, 50, 20, disabled=not show_bb)
+        bb_std_val = st.slider("BB Std Dev", 1.0, 3.0, 2.0, 0.5, disabled=not show_bb)
+    with ctrl3:
+        st.markdown("**Indicators**")
+        show_rsi = st.checkbox("RSI", value=True)
+        rsi_period = st.slider("RSI Period", 5, 30, 14, disabled=not show_rsi)
+        show_macd = st.checkbox("MACD", value=True)
+        st.caption("MACD uses standard 12/26/9 periods")
+
+    run_stock_analysis = st.button("Load Chart", type="primary")
+    stock_chart_container = st.container()
+
+    if run_stock_analysis:
+        if not stock_ticker:
+            st.error("Please enter a Stock Ticker above.")
+        else:
+            with st.spinner(f"Loading {stock_ticker.upper()} data..."):
+                try:
+                    # Fetch with 250-day warmup so SMA 200 is valid from day 1 of the display range
+                    warmup_start = datetime.combine(query_start_date, datetime.min.time()).replace(tzinfo=pytz.utc) - timedelta(days=250)
+                    fetch_end = datetime.combine(query_end_date, datetime.max.time()).replace(tzinfo=pytz.utc) if query_end_date else None
+
+                    stocks_df = proc.get_stocks(stock_ticker, start_date=warmup_start, end_date=fetch_end)
+
+                    if stocks_df.empty:
+                        with stock_chart_container:
+                            st.info("No stock data found for this ticker and date range.")
+                    else:
+                        stocks_df = stocks_df.reset_index()
+                        stocks_df['timestamp'] = pd.to_datetime(stocks_df['timestamp'])
+                        stocks_df = stocks_df.sort_values('timestamp')
+
+                        # ── Indicators ────────────────────────────────────────
+                        stocks_df['sma_20'] = stocks_df['close'].rolling(20).mean()
+                        stocks_df['sma_50'] = stocks_df['close'].rolling(50).mean()
+                        stocks_df['sma_200'] = stocks_df['close'].rolling(200).mean()
+                        stocks_df['ema_12'] = stocks_df['close'].ewm(span=12, adjust=False).mean()
+                        stocks_df['ema_26'] = stocks_df['close'].ewm(span=26, adjust=False).mean()
+
+                        stocks_df['bb_mid'] = stocks_df['close'].rolling(bb_period).mean()
+                        stocks_df['bb_std'] = stocks_df['close'].rolling(bb_period).std()
+                        stocks_df['bb_upper'] = stocks_df['bb_mid'] + bb_std_val * stocks_df['bb_std']
+                        stocks_df['bb_lower'] = stocks_df['bb_mid'] - bb_std_val * stocks_df['bb_std']
+
+                        delta = stocks_df['close'].diff()
+                        gain = delta.where(delta > 0, 0.0).rolling(rsi_period).mean()
+                        loss = (-delta.where(delta < 0, 0.0)).rolling(rsi_period).mean()
+                        stocks_df['rsi'] = 100 - (100 / (1 + gain / loss))
+
+                        stocks_df['macd'] = stocks_df['close'].ewm(span=12, adjust=False).mean() - stocks_df['close'].ewm(span=26, adjust=False).mean()
+                        stocks_df['macd_signal'] = stocks_df['macd'].ewm(span=9, adjust=False).mean()
+                        stocks_df['macd_hist'] = stocks_df['macd'] - stocks_df['macd_signal']
+
+                        # ── Filter to display range ───────────────────────────
+                        display_start = pd.to_datetime(query_start_date).tz_localize('UTC')
+                        display_df = stocks_df[stocks_df['timestamp'] >= display_start].copy()
+                        if query_end_date:
+                            display_end = pd.to_datetime(query_end_date).tz_localize('UTC') + timedelta(days=1)
+                            display_df = display_df[display_df['timestamp'] < display_end]
+
+                        if display_df.empty:
+                            with stock_chart_container:
+                                st.info("No data in the selected date range.")
+                        else:
+                            first_close = float(display_df['close'].iloc[0])
+                            last_close = float(display_df['close'].iloc[-1])
+                            pct_change = (last_close - first_close) / first_close * 100
+                            range_high = float(display_df['high'].max())
+                            range_low = float(display_df['low'].min())
+                            avg_volume = int(display_df['volume'].mean())
+                            last_rsi = display_df['rsi'].dropna().iloc[-1] if show_rsi and not display_df['rsi'].dropna().empty else None
+
+                            with stock_chart_container:
+                                st.subheader(f"{stock_ticker.upper()} — {date_display}")
+
+                                m1, m2, m3, m4, m5 = st.columns(5)
+                                m1.metric("Last Close", f"${last_close:.2f}")
+                                m2.metric("Range Change", f"{pct_change:+.2f}%")
+                                m3.metric("Range High", f"${range_high:.2f}")
+                                m4.metric("Range Low", f"${range_low:.2f}")
+                                if last_rsi is not None:
+                                    rsi_label = "Overbought" if last_rsi > 70 else ("Oversold" if last_rsi < 30 else "Neutral")
+                                    m5.metric("RSI", f"{last_rsi:.1f} — {rsi_label}")
+                                else:
+                                    m5.metric("Avg Volume", f"{avg_volume:,}")
+
+                                # ── Build subplot layout ──────────────────────
+                                n_rows_chart = 2
+                                row_heights_chart = [0.6, 0.15]
+                                subplot_titles_chart = [f"{stock_ticker.upper()} Price", "Volume"]
+                                rsi_row_num = macd_row_num = None
+
+                                if show_rsi:
+                                    rsi_row_num = n_rows_chart + 1
+                                    n_rows_chart += 1
+                                    row_heights_chart.append(0.125)
+                                    subplot_titles_chart.append(f"RSI ({rsi_period})")
+                                if show_macd:
+                                    macd_row_num = n_rows_chart + 1
+                                    n_rows_chart += 1
+                                    row_heights_chart.append(0.125)
+                                    subplot_titles_chart.append("MACD (12/26/9)")
+
+                                fig = make_subplots(
+                                    rows=n_rows_chart, cols=1,
+                                    shared_xaxes=True,
+                                    row_heights=row_heights_chart,
+                                    vertical_spacing=0.04,
+                                    subplot_titles=subplot_titles_chart,
+                                )
+
+                                ts = display_df['timestamp']
+
+                                # Price
+                                if chart_type == "Candlestick":
+                                    fig.add_trace(go.Candlestick(
+                                        x=ts, open=display_df['open'], high=display_df['high'],
+                                        low=display_df['low'], close=display_df['close'],
+                                        name="Price",
+                                        increasing_line_color='#26a69a',
+                                        decreasing_line_color='#ef5350',
+                                    ), row=1, col=1)
+                                else:
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['close'], name="Close", line=dict(color='#2196F3', width=1.5)), row=1, col=1)
+
+                                # Bollinger Bands
+                                if show_bb:
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['bb_upper'], name="BB Upper", line=dict(color='rgba(150,150,150,0.5)', width=1), showlegend=False), row=1, col=1)
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['bb_lower'], name="BB Lower", line=dict(color='rgba(150,150,150,0.5)', width=1), fill='tonexty', fillcolor='rgba(150,150,150,0.06)', showlegend=False), row=1, col=1)
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['bb_mid'], name="BB Mid", line=dict(color='rgba(180,180,180,0.7)', width=1, dash='dot')), row=1, col=1)
+
+                                # Moving averages
+                                ma_config = {
+                                    'sma_20':  ('SMA 20',  '#FF9800', show_sma_20),
+                                    'sma_50':  ('SMA 50',  '#9C27B0', show_sma_50),
+                                    'sma_200': ('SMA 200', '#F44336', show_sma_200),
+                                    'ema_12':  ('EMA 12',  '#00BCD4', show_ema_12),
+                                    'ema_26':  ('EMA 26',  '#8BC34A', show_ema_26),
+                                }
+                                for col_name, (label, color, show) in ma_config.items():
+                                    if show:
+                                        fig.add_trace(go.Scatter(x=ts, y=display_df[col_name], name=label, line=dict(color=color, width=1.2)), row=1, col=1)
+
+                                # Volume
+                                vol_colors = ['#26a69a' if c >= o else '#ef5350' for c, o in zip(display_df['close'], display_df['open'])]
+                                fig.add_trace(go.Bar(x=ts, y=display_df['volume'], name="Volume", marker_color=vol_colors, showlegend=False), row=2, col=1)
+
+                                # RSI
+                                if show_rsi and rsi_row_num:
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['rsi'], name="RSI", line=dict(color='#FF9800', width=1.5)), row=rsi_row_num, col=1)
+                                    fig.add_hline(y=70, line=dict(color='red', width=1, dash='dash'), row=rsi_row_num, col=1)
+                                    fig.add_hline(y=30, line=dict(color='green', width=1, dash='dash'), row=rsi_row_num, col=1)
+                                    fig.update_yaxes(range=[0, 100], row=rsi_row_num, col=1)
+
+                                # MACD
+                                if show_macd and macd_row_num:
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['macd'], name="MACD", line=dict(color='#2196F3', width=1.5)), row=macd_row_num, col=1)
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['macd_signal'], name="Signal", line=dict(color='#FF9800', width=1.5)), row=macd_row_num, col=1)
+                                    hist_colors = ['#26a69a' if v >= 0 else '#ef5350' for v in display_df['macd_hist'].fillna(0)]
+                                    fig.add_trace(go.Bar(x=ts, y=display_df['macd_hist'], name="Histogram", marker_color=hist_colors, showlegend=False), row=macd_row_num, col=1)
+
+                                fig.update_layout(
+                                    height=750,
+                                    xaxis_rangeslider_visible=False,
+                                    template='plotly_dark',
+                                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
+                                    margin=dict(l=0, r=0, t=60, b=0),
+                                )
+
+                                st.plotly_chart(fig, use_container_width=True)
+
+                except Exception as e:
+                    st.error(f"Stock analysis failed: {str(e)}\n{traceback.format_exc()}")
+
+# ── TWEET EXPLORER TAB ────────────────────────────────────────────────────────
+with tab_drill:
+    st.markdown("Fetch tweets, select one, then choose a stock to see how it moved around that tweet's date.")
+
+    CEO_TICKER_MAP = {
+        "elonmusk": "TSLA",
+        "tim_cook": "AAPL",
+        "satyanadella": "MSFT",
+        "sundarpichai": "GOOGL",
+        "michaeldell": "DELL",
+    }
+
+    if st.button("Fetch Tweets", type="primary", key="drill_fetch"):
+        if not ceo_handle:
+            st.error("Please enter a CEO Twitter Handle above.")
+        else:
+            with st.spinner(f"Fetching tweets for @{ceo_handle}..."):
+                try:
+                    tweets_df = run_async(proc.get_tweets(ceo_handle))
+                    if not tweets_df.empty and 'date' in tweets_df.columns:
+                        tweets_df = filter_tweets_by_date(tweets_df)
+                        tweets_df = tweets_df.sort_values('date', ascending=False).reset_index(drop=True)
+                        tweets_df['date_str'] = tweets_df['date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    st.session_state['drill_tweets'] = tweets_df
+                    st.session_state['drill_ceo'] = ceo_handle
+                except Exception as e:
+                    st.error(f"Failed to fetch tweets: {str(e)}")
+
+    if 'drill_tweets' in st.session_state and not st.session_state['drill_tweets'].empty:
+        df = st.session_state['drill_tweets']
+        st.markdown(f"**Tweets for @{st.session_state.get('drill_ceo', '')}** — click a row to select it")
+
+        event = st.dataframe(
+            df[['date_str', 'text', 'sentiment']].rename(columns={'date_str': 'date'}),
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            height=300,
+        )
+
+        selected_rows = event.selection.rows
+        if selected_rows:
+            selected = df.iloc[selected_rows[0]]
+            tweet_date_str = selected['date_str']
+            tweet_text = selected['text']
+            tweet_sentiment = float(selected['sentiment'])
+
+            st.markdown("---")
+            st.markdown(f"**Selected tweet** — {tweet_date_str}")
+            st.info(f'"{tweet_text}"')
+
+            sentiment_label = "Very Positive" if tweet_sentiment >= 0.6 else \
+                              "Positive" if tweet_sentiment >= 0.2 else \
+                              "Neutral" if tweet_sentiment >= -0.2 else \
+                              "Negative" if tweet_sentiment >= -0.6 else "Very Negative"
+            st.caption(f"Sentiment: {tweet_sentiment:.3f} — {sentiment_label}")
+
+            st.markdown("#### Stock to analyze")
+            auto_ticker = CEO_TICKER_MAP.get(st.session_state.get('drill_ceo', '').lower(), stock_ticker or "")
+            dc1, dc2 = st.columns([1, 2])
+            with dc1:
+                drill_ticker = st.text_input("Ticker", value=auto_ticker, key="drill_ticker", placeholder="e.g. TSLA")
+                window_days = st.slider("Days to show on each side of tweet", 3, 30, 10, key="drill_window")
+
+            if st.button("Load Stock Chart", type="primary", key="drill_load") and drill_ticker:
+                tweet_dt = pd.to_datetime(tweet_date_str)
+                if tweet_dt.tzinfo is None:
+                    tweet_dt = tweet_dt.tz_localize('UTC')
+
+                fetch_start = tweet_dt - timedelta(days=window_days + 5)
+                fetch_end = tweet_dt + timedelta(days=window_days + 5)
+
+                with st.spinner(f"Loading {drill_ticker.upper()} around {tweet_date_str[:10]}..."):
+                    try:
+                        stocks_df = proc.get_stocks(drill_ticker, start_date=fetch_start, end_date=fetch_end)
+
+                        if stocks_df.empty:
+                            st.info("No stock data found for this ticker in this window.")
+                        else:
+                            stocks_df = stocks_df.reset_index()
+                            stocks_df['timestamp'] = pd.to_datetime(stocks_df['timestamp'])
+                            stocks_df = stocks_df.sort_values('timestamp')
+
+                            window_start = tweet_dt - timedelta(days=window_days)
+                            window_end = tweet_dt + timedelta(days=window_days)
+                            display_df = stocks_df[
+                                (stocks_df['timestamp'] >= window_start) &
+                                (stocks_df['timestamp'] <= window_end)
+                            ].copy()
+
+                            if display_df.empty:
+                                st.info("No stock data in this window.")
+                            else:
+                                fig = make_subplots(
+                                    rows=2, cols=1,
+                                    shared_xaxes=True,
+                                    row_heights=[0.72, 0.28],
+                                    vertical_spacing=0.05,
+                                    subplot_titles=[f"{drill_ticker.upper()} Price", "Volume"],
+                                )
+
+                                ts = display_df['timestamp']
+
+                                fig.add_trace(go.Candlestick(
+                                    x=ts,
+                                    open=display_df['open'], high=display_df['high'],
+                                    low=display_df['low'], close=display_df['close'],
+                                    name="Price",
+                                    increasing_line_color='#26a69a',
+                                    decreasing_line_color='#ef5350',
+                                ), row=1, col=1)
+
+                                vol_colors = ['#26a69a' if c >= o else '#ef5350'
+                                              for c, o in zip(display_df['close'], display_df['open'])]
+                                fig.add_trace(go.Bar(
+                                    x=ts, y=display_df['volume'],
+                                    name="Volume", marker_color=vol_colors, showlegend=False
+                                ), row=2, col=1)
+
+                                # Tweet marker line
+                                fig.add_vline(
+                                    x=tweet_dt,
+                                    line=dict(color='yellow', width=2, dash='dash'),
+                                )
+                                fig.add_annotation(
+                                    x=tweet_dt, y=1.05, yref='paper',
+                                    text="📝 Tweet posted",
+                                    showarrow=False,
+                                    font=dict(color='yellow', size=12),
+                                    bgcolor='rgba(0,0,0,0.6)',
+                                )
+
+                                fig.update_layout(
+                                    height=520,
+                                    xaxis_rangeslider_visible=False,
+                                    template='plotly_dark',
+                                    margin=dict(l=0, r=0, t=50, b=0),
+                                    showlegend=False,
+                                )
+
+                                st.plotly_chart(fig, use_container_width=True)
+
+                                # Before / after stats
+                                before = display_df[display_df['timestamp'] < tweet_dt]
+                                after = display_df[display_df['timestamp'] > tweet_dt]
+
+                                if not before.empty and not after.empty:
+                                    pre_close = float(before['close'].iloc[-1])
+                                    next_close = float(after['close'].iloc[0])
+                                    day5_close = float(after['close'].iloc[min(4, len(after) - 1)])
+                                    days_shown = min(5, len(after))
+
+                                    s1, s2, s3 = st.columns(3)
+                                    s1.metric("Close before tweet", f"${pre_close:.2f}")
+                                    s2.metric("Next trading day", f"${next_close:.2f}",
+                                              f"{((next_close - pre_close) / pre_close * 100):+.2f}%")
+                                    s3.metric(f"{days_shown} trading days later", f"${day5_close:.2f}",
+                                              f"{((day5_close - pre_close) / pre_close * 100):+.2f}%")
+
+                    except Exception as e:
+                        st.error(f"Failed to load stock data: {str(e)}\n{traceback.format_exc()}")
+
+# ── MARKET CONTEXT TAB ────────────────────────────────────────────────────────
+with tab_ctx:
+    st.markdown("See whether a stock's price move was caused by a tweet — or by something bigger happening in the market.")
+
+    with st.expander("📖 Glossary — click to learn what each term means"):
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            st.markdown("""
+**SPY (Market Benchmark)**
+SPY is an ETF that tracks the S&P 500 — basically the average performance of the 500 biggest companies in the US. Think of it as a thermometer for the whole stock market. If SPY goes up 2% and your stock also goes up 2%, the market did that — not the tweet.
+
+**Sector ETF**
+Every stock belongs to an industry group (tech, retail, energy, etc.). A sector ETF tracks just that group. For example, XLK tracks tech stocks. If Apple rises but so does all of tech, the industry moved — not something Apple-specific.
+
+**Indexed to 100**
+To fairly compare stocks with very different prices, we reset all of them to start at 100 on day one. After that, every point above or below 100 shows the percentage change. So a stock at 108 is up 8%, and one at 95 is down 5% — even if their actual prices are wildly different.
+""")
+        with gc2:
+            st.markdown("""
+**Alpha**
+Alpha is how much better (or worse) a stock did compared to the market. If the market went up 3% and your stock went up 7%, the alpha is +4% — that extra 4% is what might be explained by company-specific events like a CEO tweet.
+
+**Earnings Date**
+Four times a year, companies publicly report how much money they made. These announcements almost always cause big stock moves — up or down. If a tweet happened right around an earnings date, the earnings report is likely the real driver, not the tweet.
+
+**News Headlines**
+Real news articles published around the same time as the tweets. If a CEO tweeted something positive but there was also a major negative news story that day, the news probably had more impact on the stock price than the tweet.
+""")
+
+    CEO_COMPANY_MAP = {
+        "TSLA": "Tesla", "AAPL": "Apple", "MSFT": "Microsoft",
+        "GOOGL": "Google", "GOOG": "Google", "DELL": "Dell",
+        "AMZN": "Amazon", "META": "Meta", "NVDA": "Nvidia",
+    }
+
+    run_ctx = st.button("Load Market Context", type="primary")
+    ctx_container = st.container()
+
+    if run_ctx:
+        if not stock_ticker:
+            st.error("Please enter a Stock Ticker above.")
+        else:
+            with st.spinner("Loading market context..."):
+                try:
+                    ticker_upper = stock_ticker.upper()
+                    company_name = CEO_COMPANY_MAP.get(ticker_upper, ticker_upper)
+                    sector_etf = get_sector_etf(ticker_upper)
+
+                    start_dt = datetime.combine(query_start_date, datetime.min.time()).replace(tzinfo=pytz.utc)
+                    end_dt = datetime.combine(query_end_date, datetime.max.time()).replace(tzinfo=pytz.utc) if query_end_date else None
+
+                    # Fetch stock, SPY, and sector in parallel-ish
+                    stock_df = proc.get_stocks(ticker_upper, start_date=start_dt, end_date=end_dt)
+                    spy_df, sector_df, _ = proc.get_market_context(ticker_upper, start_date=start_dt, end_date=end_dt)
+
+                    if stock_df.empty:
+                        with ctx_container:
+                            st.info("No stock data found.")
+                    else:
+                        # Normalise all three to 100 at start for comparison
+                        def normalise(df):
+                            df = df.reset_index()
+                            df['timestamp'] = pd.to_datetime(df['timestamp'])
+                            df = df.sort_values('timestamp')
+                            if 'symbol' in df.columns:
+                                df = df[['timestamp', 'close']]
+                            first = df['close'].iloc[0]
+                            df['indexed'] = (df['close'] / first) * 100
+                            return df
+
+                        stock_n = normalise(stock_df.copy())
+                        spy_n   = normalise(spy_df.copy()) if not spy_df.empty else None
+                        sector_n = normalise(sector_df.copy()) if not sector_df.empty else None
+
+                        # Earnings dates
+                        earnings_dates = get_earnings_dates(ticker_upper)
+
+                        # News
+                        news_start = query_start_date
+                        news_end = query_end_date if query_end_date else query_start_date + timedelta(days=7)
+                        news = get_news_for_range(ticker_upper, company_name, news_start, news_end)
+
+                        with ctx_container:
+                            st.subheader(f"{ticker_upper} vs SPY vs {sector_etf} — {date_display}")
+                            st.caption("All series indexed to 100 at the start of the period — shows relative performance, not raw price.")
+
+                            # Relative performance chart
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(x=stock_n['timestamp'], y=stock_n['indexed'],
+                                                     name=ticker_upper, line=dict(color='#2196F3', width=2)))
+                            if spy_n is not None:
+                                fig.add_trace(go.Scatter(x=spy_n['timestamp'], y=spy_n['indexed'],
+                                                         name='SPY (Market)', line=dict(color='#9E9E9E', width=1.5, dash='dot')))
+                            if sector_n is not None:
+                                fig.add_trace(go.Scatter(x=sector_n['timestamp'], y=sector_n['indexed'],
+                                                         name=sector_etf, line=dict(color='#FF9800', width=1.5, dash='dash')))
+
+                            # Earnings markers
+                            for ed in earnings_dates:
+                                ed_dt = pd.to_datetime(ed).tz_localize('UTC')
+                                if stock_n['timestamp'].min() <= ed_dt <= stock_n['timestamp'].max():
+                                    fig.add_vline(x=ed_dt, line=dict(color='#E91E63', width=1.5, dash='dash'))
+                                    fig.add_annotation(x=ed_dt, y=1.02, yref='paper', text="Earnings",
+                                                       showarrow=False, font=dict(color='#E91E63', size=10),
+                                                       bgcolor='rgba(0,0,0,0.5)')
+
+                            fig.update_layout(
+                                height=450,
+                                template='plotly_dark',
+                                yaxis_title="Indexed Price (start = 100)",
+                                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
+                                margin=dict(l=0, r=0, t=50, b=0),
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+
+                            # Summary metrics
+                            stock_ret = stock_n['indexed'].iloc[-1] - 100
+                            spy_ret   = (spy_n['indexed'].iloc[-1] - 100) if spy_n is not None else None
+                            sec_ret   = (sector_n['indexed'].iloc[-1] - 100) if sector_n is not None else None
+                            alpha_vs_spy = (stock_ret - spy_ret) if spy_ret is not None else None
+                            alpha_vs_sec = (stock_ret - sec_ret) if sec_ret is not None else None
+
+                            m1, m2, m3, m4 = st.columns(4)
+                            m1.metric(f"{ticker_upper} Return", f"{stock_ret:+.2f}%")
+                            if spy_ret is not None:
+                                m2.metric("SPY Return", f"{spy_ret:+.2f}%")
+                            if alpha_vs_spy is not None:
+                                m3.metric("Alpha vs Market", f"{alpha_vs_spy:+.2f}%",
+                                          help="How much better/worse the stock did vs SPY")
+                            if alpha_vs_sec is not None:
+                                m4.metric(f"Alpha vs {sector_etf}", f"{alpha_vs_sec:+.2f}%",
+                                          help=f"How much better/worse vs the sector ETF {sector_etf}")
+
+                            # Interpretation
+                            if alpha_vs_spy is not None:
+                                if abs(alpha_vs_spy) < 1.0:
+                                    st.info(f"**{ticker_upper}** moved almost identically to the market — price changes this period are likely market-driven, not tweet-driven.")
+                                elif alpha_vs_spy > 0:
+                                    st.success(f"**{ticker_upper}** outperformed the market by {alpha_vs_spy:+.2f}%. That excess return is worth investigating for tweet/news correlation.")
+                                else:
+                                    st.warning(f"**{ticker_upper}** underperformed the market by {alpha_vs_spy:.2f}%. Something company-specific may be dragging it down.")
+
+                            # News headlines
+                            st.subheader("News Headlines in This Period")
+                            if not news:
+                                st.info("No news found — either no articles exist for this period or the NewsAPI free tier limit (1 month history) was exceeded.")
+                            else:
+                                for article in news:
+                                    st.markdown(f"**{article['published']}** — [{article['title']}]({article['url']}) _{article['source']}_")
+
+                except Exception as e:
+                    st.error(f"Market context failed: {str(e)}\n{traceback.format_exc()}")

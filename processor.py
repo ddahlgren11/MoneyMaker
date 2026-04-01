@@ -46,6 +46,14 @@ class DataProcessor:
             })
         return pd.DataFrame(all_tweets)
 
+    def get_market_context(self, ticker, start_date, end_date):
+        """Fetch SPY and sector ETF bars for the same date range."""
+        from context import get_sector_etf
+        sector_etf = get_sector_etf(ticker)
+        spy_df = self.get_stocks("SPY", start_date, end_date)
+        sector_df = self.get_stocks(sector_etf, start_date, end_date)
+        return spy_df, sector_df, sector_etf
+
     def get_stocks(self, symbol, start_date=None, end_date=None):
         if end_date is None:
             end_date = datetime.now(timezone.utc) - timedelta(days=1)
