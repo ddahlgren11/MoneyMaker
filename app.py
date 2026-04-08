@@ -274,7 +274,7 @@ def weekend_shift(dt):
     return dt
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_home, tab_data, tab_atr, tab_impact, tab_trend, tab_stock, tab_drill, tab_ctx = st.tabs(["Home", "Data", "ATR Analysis", "Tweet Impact", "Post-Tweet Trend", "Stock Analysis", "Tweet Explorer", "Market Context"])
+tab_home, tab_data, tab_impact, tab_stock, tab_drill, tab_ctx = st.tabs(["Home", "Data", "Tweet Analysis", "Stock Analysis", "Tweet Explorer", "Market Context"])
 
 # ── HOME TAB ──────────────────────────────────────────────────────────────────
 with tab_home:
@@ -491,8 +491,9 @@ with tab_data:
                 except Exception as e:
                     st.error(f"Failed to fetch merged data: {str(e)}")
 
-# ── ATR ANALYSIS TAB ──────────────────────────────────────────────────────────
-with tab_atr:
+# ── STOCK ANALYSIS TAB — ATR section ─────────────────────────────────────────
+with tab_stock:
+    st.markdown("### ATR Analysis")
     st.markdown("Identifies periods where high-sentiment tweets coincide with unusual stock volatility relative to the 14-day ATR baseline.")
     run_atr = st.button("Run ATR Analysis", type="primary")
     atr_results_container = st.container()
@@ -610,8 +611,9 @@ with tab_atr:
                 except Exception as e:
                     st.error(f"ATR Analysis failed: {str(e)}\n{traceback.format_exc()}")
 
-# ── TWEET IMPACT TAB ──────────────────────────────────────────────────────────
+# ── TWEET ANALYSIS TAB (Tweet Impact + Post-Tweet Trend) ─────────────────────
 with tab_impact:
+    st.markdown("### Tweet Impact")
     st.markdown("Measures same-day stock reaction on days a high-sentiment tweet was posted. Compares open-to-close move and volume against the 14-day baseline.")
     run_impact = st.button("Run Tweet Impact", type="primary")
     impact_results_container = st.container()
@@ -745,10 +747,9 @@ with tab_impact:
                 except Exception as e:
                     st.error(f"Tweet Impact analysis failed: {str(e)}\n{traceback.format_exc()}")
 
-# ── POST-TWEET TREND TAB ──────────────────────────────────────────────────────
-with tab_trend:
+    st.markdown("---")
+    st.markdown("### Post-Tweet Trend")
     st.markdown("Shows how the stock price evolves over N trading days after a high-sentiment tweet. Each spoke on the radar is a trading day; the radial value is the average cumulative % return across all tweets.")
-
     max_days = st.slider("Trading days to look ahead", min_value=2, max_value=14, value=7)
     run_trend = st.button("Run Post-Tweet Trend", type="primary")
     trend_results_container = st.container()
@@ -896,8 +897,10 @@ with tab_trend:
                 except Exception as e:
                     st.error(f"Post-Tweet Trend analysis failed: {str(e)}\n{traceback.format_exc()}")
 
-# ── STOCK ANALYSIS TAB ────────────────────────────────────────────────────────
+# ── STOCK ANALYSIS TAB — Chart section ───────────────────────────────────────
 with tab_stock:
+    st.markdown("---")
+    st.markdown("### Stock Chart")
 
     with st.expander("📖 Glossary — click to learn what each term means"):
         g1, g2 = st.columns(2)

@@ -14,3 +14,6 @@ plotly
 newsapi-python
 yfinance
 pytz
+pytest
+pytest-asyncio
+httpx
