@@ -44,7 +44,7 @@ class DataProcessor:
 
     async def get_tweets(self, username):
         all_tweets = []
-        user_tweets = await self.twitter_client.get_tweets(username, pages=2)
+        user_tweets = await self.twitter_client.get_tweets(username, pages=10)
         for tweet in user_tweets:
             # Skip retweets — they reflect someone else's words, not the CEO's
             if tweet.is_retweet:

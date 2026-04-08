@@ -19,7 +19,7 @@ load_dotenv()
 
 # --- DATABASE SETUP ---
 DATABASE_URL = os.getenv("DATABASE_URL")
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
@@ -130,8 +130,12 @@ async def process_and_save_all(db: Session = Depends(get_db)):
     }
     
     total_records = 0
-    
+
     try:
+        # Clear existing records so re-runs don't create duplicates
+        db.query(MergedRecord).delete()
+        db.flush()
+
         for username, ticker in targets.items():
             # 1. Fetch Tweets using processor logic
             tweets_df = await proc.get_tweets(username)
