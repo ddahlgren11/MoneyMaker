@@ -67,6 +67,7 @@ VALID_REFINED_SENTIMENTS = {"Very Positive", "Positive", "Neutral", "Negative", 
 class TestApiTweets:
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_success_status(self, mock_tweets):
+        # Every response should come back with HTTP 200 and status: "success"
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         r = client.get("/api/tweets/elonmusk")
         assert r.status_code == 200
@@ -74,6 +75,7 @@ class TestApiTweets:
 
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_data_is_list(self, mock_tweets):
+        # The "data" field should be a list with one item per tweet
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         r = client.get("/api/tweets/elonmusk")
         assert isinstance(r.json()["data"], list)
@@ -81,6 +83,7 @@ class TestApiTweets:
 
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_required_fields_present(self, mock_tweets):
+        # Every tweet record must have these three fields — if one is missing the UI will break
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         r = client.get("/api/tweets/elonmusk")
         record = r.json()["data"][0]
@@ -89,6 +92,7 @@ class TestApiTweets:
 
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_sentiment_within_tolerance(self, mock_tweets):
+        # VADER produces scores in [-1, 1] — any value outside that range means something broke
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         r = client.get("/api/tweets/elonmusk")
         for rec in r.json()["data"]:
@@ -97,12 +101,15 @@ class TestApiTweets:
 
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_empty_response_for_unknown_ceo(self, mock_tweets):
+        # An unknown CEO should return an empty list, not a crash
         mock_tweets.return_value = pd.DataFrame()
         r = client.get("/api/tweets/unknownuser999")
         assert r.json() == {"status": "success", "data": []}
 
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_error_returns_status_field(self, mock_tweets):
+        # If Twitter goes down entirely, the response should still have a "status" field
+        # set to "error" rather than returning an unstructured crash
         mock_tweets.side_effect = RuntimeError("Twitter unavailable")
         r = client.get("/api/tweets/elonmusk")
         body = r.json()
@@ -115,6 +122,7 @@ class TestApiTweets:
 class TestApiStocks:
     @patch("main.proc.get_stocks")
     def test_success_status(self, mock_stocks):
+        # Every response should come back with HTTP 200 and status: "success"
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/stocks/AAPL")
         assert r.status_code == 200
@@ -122,6 +130,7 @@ class TestApiStocks:
 
     @patch("main.proc.get_stocks")
     def test_ohlcv_fields_present(self, mock_stocks):
+        # Every bar must have all 5 OHLCV fields — missing any would break charting
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/stocks/AAPL")
         record = r.json()["data"][0]
@@ -130,6 +139,7 @@ class TestApiStocks:
 
     @patch("main.proc.get_stocks")
     def test_prices_positive(self, mock_stocks):
+        # Stock prices must always be greater than zero — negative prices mean corrupt data
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/stocks/AAPL")
         for rec in r.json()["data"]:
@@ -138,6 +148,7 @@ class TestApiStocks:
 
     @patch("main.proc.get_stocks")
     def test_high_gte_low(self, mock_stocks):
+        # High must always be >= low — an impossible bar means the data is corrupted
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/stocks/AAPL")
         for rec in r.json()["data"]:
@@ -147,6 +158,7 @@ class TestApiStocks:
 
     @patch("main.proc.get_stocks")
     def test_volume_non_negative(self, mock_stocks):
+        # Volume can be zero (halted stock) but never negative
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/stocks/AAPL")
         for rec in r.json()["data"]:
@@ -154,12 +166,14 @@ class TestApiStocks:
 
     @patch("main.proc.get_stocks")
     def test_empty_response_for_unknown_ticker(self, mock_stocks):
+        # An unknown ticker should return an empty list, not a crash
         mock_stocks.return_value = pd.DataFrame()
         r = client.get("/api/stocks/FAKE")
         assert r.json() == {"status": "success", "data": []}
 
     @patch("main.proc.get_stocks")
     def test_error_returns_status_field(self, mock_stocks):
+        # If Alpaca goes down entirely, the response should still be structured with status: "error"
         mock_stocks.side_effect = RuntimeError("Alpaca unavailable")
         r = client.get("/api/stocks/AAPL")
         body = r.json()
@@ -173,6 +187,7 @@ class TestApiMerged:
     @patch("main.proc.get_stocks")
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_success_status(self, mock_tweets, mock_stocks):
+        # Every response should come back with HTTP 200 and status: "success"
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/merged/elonmusk/TSLA")
@@ -182,6 +197,7 @@ class TestApiMerged:
     @patch("main.proc.get_stocks")
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_all_fields_present(self, mock_tweets, mock_stocks):
+        # Every merged record must have all 10 expected fields — missing any breaks the UI and model
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/merged/elonmusk/TSLA")
@@ -197,6 +213,7 @@ class TestApiMerged:
     @patch("main.proc.get_stocks")
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_sentiment_score_in_range(self, mock_tweets, mock_stocks):
+        # Sentiment scores must stay in [-1, 1] — the model depends on this
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/merged/elonmusk/TSLA")
@@ -207,6 +224,8 @@ class TestApiMerged:
     @patch("main.proc.get_stocks")
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_refined_sentiment_valid(self, mock_tweets, mock_stocks):
+        # refined_sentiment must be one of the 5 known labels — anything else means
+        # get_refined_sentiment() has a bug or a new label was added without updating tests
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/merged/elonmusk/TSLA")
@@ -218,6 +237,7 @@ class TestApiMerged:
     @patch("main.proc.get_stocks")
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_stock_close_positive_when_matched(self, mock_tweets, mock_stocks):
+        # When a tweet matches a trading day, the closing price must be positive
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/merged/elonmusk/TSLA")
@@ -228,6 +248,7 @@ class TestApiMerged:
     @patch("main.proc.get_stocks")
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_ceo_field_matches_request(self, mock_tweets, mock_stocks):
+        # The ceo field in every record should match the handle passed in the URL
         mock_tweets.return_value = SAMPLE_TWEETS_DF
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/merged/elonmusk/TSLA")
@@ -237,6 +258,7 @@ class TestApiMerged:
     @patch("main.proc.get_stocks")
     @patch("main.proc.get_tweets", new_callable=AsyncMock)
     def test_empty_tweets_returns_empty_list(self, mock_tweets, mock_stocks):
+        # If no tweets are found, the endpoint should return an empty list not a crash
         mock_tweets.return_value = pd.DataFrame()
         mock_stocks.return_value = SAMPLE_STOCKS_DF
         r = client.get("/api/merged/elonmusk/TSLA")
