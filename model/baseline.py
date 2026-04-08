@@ -4,6 +4,10 @@ Baseline model — predicts next-day stock direction (up=1, down=0) from tweet f
 Usage:
     python3 model/baseline.py
 
+Running this script trains the model and saves it to model/trained_model.pkl.
+The Streamlit Predict tab loads that file — re-run this script any time you want
+to retrain on fresh data.
+
 Models trained:
     1. Naive baseline  — always predicts the majority class (sets the floor)
     2. Logistic Regression — linear, interpretable
@@ -17,6 +21,8 @@ import pandas as pd
 import numpy as np
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+import os
+import joblib
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import OneHotEncoder
@@ -177,3 +183,11 @@ elif best_acc > naive_acc:
 else:
     print(f"\n  Neither model beats the naive baseline — the current features may not have predictive power yet.")
     print("  Consider adding RSI/ATR state at tweet time and news sentiment (priorities #5 and #6).")
+
+# ── Save best model ───────────────────────────────────────────────────────────
+
+# Logistic Regression is saved as the production model — it consistently
+# outperforms Random Forest on this dataset size
+model_path = os.path.join(os.path.dirname(__file__), "trained_model.pkl")
+joblib.dump(lr, model_path)
+print(f"\n  Model saved to {model_path}")

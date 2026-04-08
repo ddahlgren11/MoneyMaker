@@ -274,7 +274,7 @@ def weekend_shift(dt):
     return dt
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_home, tab_data, tab_impact, tab_stock, tab_drill, tab_ctx = st.tabs(["Home", "Data", "Tweet Analysis", "Stock Analysis", "Tweet Explorer", "Market Context"])
+tab_home, tab_data, tab_impact, tab_stock, tab_drill, tab_ctx, tab_predict = st.tabs(["Home", "Data", "Tweet Analysis", "Stock Analysis", "Tweet Explorer", "Market Context", "Predict"])
 
 # ── HOME TAB ──────────────────────────────────────────────────────────────────
 with tab_home:
@@ -1447,3 +1447,98 @@ Real news articles published around the same time as the tweets. If a CEO tweete
 
                 except Exception as e:
                     st.error(f"Market context failed: {str(e)}\n{traceback.format_exc()}")
+
+# ── PREDICT TAB ───────────────────────────────────────────────────────────────
+with tab_predict:
+    st.markdown("Runs the trained prediction model on recent tweets and shows whether the stock is expected to go **Up** or **Down** the next trading day.")
+
+    import os as _os
+    from model.predict import predict_tweets as _predict_tweets
+
+    model_path = _os.path.join("model", "trained_model.pkl")
+    if not _os.path.exists(model_path):
+        st.warning("No trained model found. Run `python3 model/baseline.py` first to train and save it.")
+    else:
+        run_predict = st.button("Run Predictions", type="primary")
+        predict_container = st.container()
+
+        if run_predict:
+            if not ceo_handle or not stock_ticker:
+                st.error("Please enter a CEO Twitter Handle and a Stock Ticker above.")
+            else:
+                with st.spinner("Fetching tweets and computing predictions..."):
+                    try:
+                        # Fetch tweets
+                        tweets_df = run_async(proc.get_tweets(ceo_handle))
+                        if not tweets_df.empty and "date" in tweets_df.columns:
+                            tweets_df = filter_tweets_by_date(tweets_df)
+
+                        if tweets_df.empty:
+                            with predict_container:
+                                st.info("No tweets found for this date range.")
+                        else:
+                            # Fetch stocks with 30-day lookback so RSI/ATR are valid
+                            min_date = tweets_df["date"].min() - timedelta(days=30)
+                            max_date = tweets_df["date"].max() + timedelta(days=5)
+                            stocks_df = proc.get_stocks(stock_ticker, start_date=min_date, end_date=max_date)
+
+                            if not stocks_df.empty:
+                                stocks_df = stocks_df.sort_index()
+                                if isinstance(stocks_df.index, pd.MultiIndex):
+                                    stocks_df["date_only"] = stocks_df.index.get_level_values("timestamp").date
+                                else:
+                                    stocks_df["date_only"] = stocks_df.index.date
+
+                                # Compute RSI and ATR (same as ingestion)
+                                stocks_df["prev_close"] = stocks_df["close"].shift(1)
+                                stocks_df["tr"] = stocks_df[["high", "low", "prev_close"]].apply(
+                                    lambda r: max(r["high"] - r["low"],
+                                                  abs(r["high"] - r["prev_close"]),
+                                                  abs(r["low"] - r["prev_close"])), axis=1
+                                )
+                                stocks_df["atr_14"] = stocks_df["tr"].rolling(14).mean()
+                                delta = stocks_df["close"].diff()
+                                gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+                                loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+                                stocks_df["rsi_14"] = 100 - (100 / (1 + gain / loss))
+
+                            # Run predictions
+                            result_df = _predict_tweets(tweets_df, stocks_df)
+
+                            with predict_container:
+                                st.subheader(f"Predictions — @{ceo_handle} & {stock_ticker.upper()} ({date_display})")
+
+                                # Summary metrics
+                                up_count = (result_df["predicted_direction"] == "Up").sum()
+                                down_count = (result_df["predicted_direction"] == "Down").sum()
+                                avg_conf = result_df["confidence_pct"].mean()
+                                m1, m2, m3 = st.columns(3)
+                                m1.metric("Predicted Up", up_count)
+                                m2.metric("Predicted Down", down_count)
+                                m3.metric("Avg Confidence", f"{avg_conf:.1f}%")
+
+                                # Results table
+                                display_df = result_df[["date", "text", "sentiment", "likes", "retweet_count", "predicted_direction", "confidence_pct"]].copy()
+                                display_df["date"] = display_df["date"].astype(str).str[:19]
+                                display_df["text"] = display_df["text"].str[:120]
+                                display_df = display_df.rename(columns={
+                                    "date": "Date",
+                                    "text": "Tweet",
+                                    "sentiment": "Sentiment",
+                                    "likes": "Likes",
+                                    "retweet_count": "Retweets",
+                                    "predicted_direction": "Prediction",
+                                    "confidence_pct": "Confidence %",
+                                })
+
+                                def _color_prediction(val):
+                                    color = "#26a69a" if val == "Up" else "#ef5350"
+                                    return f"color: {color}; font-weight: bold"
+
+                                styled = display_df.style.map(_color_prediction, subset=["Prediction"])
+                                st.dataframe(styled, use_container_width=True)
+
+                    except FileNotFoundError as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"Prediction failed: {str(e)}\n{traceback.format_exc()}")
