@@ -1137,7 +1137,12 @@ with tab_drill:
         "tim_cook": "AAPL",
         "satyanadella": "MSFT",
         "sundarpichai": "GOOGL",
-        "michaeldell": "DELL",
+        "MichaelDell": "DELL",
+        "LisaSu": "AMD",
+        "ajassy": "AMZN",
+        "bchesky": "ABNB",
+        "dkhos": "UBER",
+        "RobertIger": "DIS",
     }
 
     if st.button("Fetch Tweets", type="primary", key="drill_fetch"):

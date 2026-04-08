@@ -13,7 +13,8 @@ import pandas as pd
 
 # Import the logic from your new files
 from processor import DataProcessor
-from classifier import get_refined_sentiment, get_tone_category, get_tweet_type
+from classifier import get_refined_sentiment, get_tone_category, get_tweet_type, get_sentiment_score
+from context import get_news_for_date
 
 load_dotenv()
 
@@ -75,6 +76,11 @@ class MergedRecord(Base):
     is_premarket = Column(Integer)  # stored as 0/1
     # Prediction target
     next_day_direction = Column(Integer, nullable=True)  # 1 = up, 0 = down, NULL = no next-day data
+    # Technical state at tweet time
+    rsi_at_tweet = Column(Float, nullable=True)
+    atr_at_tweet = Column(Float, nullable=True)
+    # News sentiment on tweet day
+    news_sentiment_score = Column(Float, nullable=True)
 
 # Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
@@ -126,8 +132,30 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         "tim_cook": "AAPL",
         "satyanadella": "MSFT",
         "sundarpichai": "GOOGL",
-        "MichaelDell": "DELL"
+        "MichaelDell": "DELL",
+        "LisaSu": "AMD",
+        "ajassy": "AMZN",
+        "bchesky": "ABNB",
+        "dkhos": "UBER",
+        "RobertIger": "DIS",
     }
+
+    # Company names for news queries
+    ticker_company = {
+        "TSLA": "Tesla",
+        "AAPL": "Apple",
+        "MSFT": "Microsoft",
+        "GOOGL": "Google",
+        "DELL": "Dell",
+        "AMD": "AMD Advanced Micro Devices",
+        "AMZN": "Amazon",
+        "ABNB": "Airbnb",
+        "UBER": "Uber",
+        "DIS": "Disney",
+    }
+
+    # Cache news scores by (ticker, date) — one NewsAPI call per day, not per tweet
+    news_cache = {}
     
     total_records = 0
 
@@ -136,27 +164,48 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         db.query(MergedRecord).delete()
         db.flush()
 
+        skipped = []
         for username, ticker in targets.items():
             # 1. Fetch Tweets using processor logic
-            tweets_df = await proc.get_tweets(username)
+            try:
+                tweets_df = await proc.get_tweets(username)
+            except Exception as e:
+                skipped.append({"username": username, "reason": str(e)})
+                continue
             if tweets_df.empty:
                 continue
 
             tweets_df = tweets_df.sort_values(by='date', ascending=False)
 
-            # Calculate date range with padding for weekends/holidays
-            min_date = tweets_df['date'].min() - timedelta(days=5)
+            # Extra 30-day lookback so RSI/ATR rolling windows are valid from the first tweet
+            min_date = tweets_df['date'].min() - timedelta(days=30)
             max_date = tweets_df['date'].max() + timedelta(days=5)
-            
+
             # 2. Fetch Stock Data for the associated ticker
             stocks_df = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
 
             if not stocks_df.empty:
+                stocks_df = stocks_df.sort_index()
                 if isinstance(stocks_df.index, pd.MultiIndex):
                     stock_dates = stocks_df.index.get_level_values('timestamp').date
                 else:
                     stock_dates = stocks_df.index.date
                 stocks_df['date_only'] = stock_dates
+
+                # ATR (14-period)
+                stocks_df['prev_close'] = stocks_df['close'].shift(1)
+                stocks_df['tr'] = stocks_df[['high', 'low', 'prev_close']].apply(
+                    lambda r: max(r['high'] - r['low'],
+                                  abs(r['high'] - r['prev_close']),
+                                  abs(r['low'] - r['prev_close'])), axis=1
+                )
+                stocks_df['atr_14'] = stocks_df['tr'].rolling(14).mean()
+
+                # RSI (14-period)
+                delta = stocks_df['close'].diff()
+                gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+                loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+                stocks_df['rsi_14'] = 100 - (100 / (1 + gain / loss))
             
             # 3. Process and merge each tweet
             for _, row in tweets_df.iterrows():
@@ -177,6 +226,8 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                 stock_volume = 0.0
                 stock_open_close_diff = 0.0
                 next_day_direction = None
+                rsi_at_tweet = None
+                atr_at_tweet = None
                 if not stocks_df.empty:
                     valid_stocks = stocks_df[stocks_df['date_only'] >= target_date_only]
                     if not valid_stocks.empty:
@@ -187,6 +238,22 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                         if len(valid_stocks) >= 2:
                             next_close = float(valid_stocks['close'].iloc[1])
                             next_day_direction = 1 if next_close > stock_close else 0
+                        rsi_val = valid_stocks['rsi_14'].iloc[0]
+                        atr_val = valid_stocks['atr_14'].iloc[0]
+                        rsi_at_tweet = float(rsi_val) if not pd.isna(rsi_val) else None
+                        atr_at_tweet = float(atr_val) if not pd.isna(atr_val) else None
+
+                # News sentiment — cached per (ticker, date) to stay within API rate limits
+                news_key = (ticker, target_date_only.isoformat())
+                if news_key not in news_cache:
+                    company = ticker_company.get(ticker, ticker)
+                    articles = get_news_for_date(ticker, company, target_date_only)
+                    if articles:
+                        scores = [get_sentiment_score(a['title']) for a in articles]
+                        news_cache[news_key] = round(sum(scores) / len(scores), 4)
+                    else:
+                        news_cache[news_key] = None
+                news_sentiment_score = news_cache[news_key]
 
                 new_record = MergedRecord(
                     date=tweet_date.isoformat(),
@@ -207,12 +274,15 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                     tweet_hour=int(row.get('tweet_hour', 0)),
                     is_premarket=int(row.get('is_premarket', 0)),
                     next_day_direction=next_day_direction,
+                    rsi_at_tweet=rsi_at_tweet,
+                    atr_at_tweet=atr_at_tweet,
+                    news_sentiment_score=news_sentiment_score,
                 )
                 db.add(new_record)
                 total_records += 1
         
         db.commit()
-        return {"status": "Success", "records_added": total_records}
+        return {"status": "Success", "records_added": total_records, "skipped": skipped}
         
     except Exception as e:
         db.rollback()
@@ -282,20 +352,41 @@ async def api_get_merged(ceo: str, ticker: str):
 
         tweets_df = tweets_df.sort_values(by='date', ascending=False)
 
-        # Calculate date range with padding for weekends/holidays
-        min_date = tweets_df['date'].min() - timedelta(days=5)
+        # Extra 30-day lookback so RSI/ATR rolling windows are valid from the first tweet
+        min_date = tweets_df['date'].min() - timedelta(days=30)
         max_date = tweets_df['date'].max() + timedelta(days=5)
 
         # 2. Fetch Stock Data
         stocks_df = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
 
         if not stocks_df.empty:
+            stocks_df = stocks_df.sort_index()
             if isinstance(stocks_df.index, pd.MultiIndex):
                 stock_dates = stocks_df.index.get_level_values('timestamp').date
             else:
                 stock_dates = stocks_df.index.date
             stocks_df['date_only'] = stock_dates
 
+            # ATR (14-period)
+            stocks_df['prev_close'] = stocks_df['close'].shift(1)
+            stocks_df['tr'] = stocks_df[['high', 'low', 'prev_close']].apply(
+                lambda r: max(r['high'] - r['low'],
+                              abs(r['high'] - r['prev_close']),
+                              abs(r['low'] - r['prev_close'])), axis=1
+            )
+            stocks_df['atr_14'] = stocks_df['tr'].rolling(14).mean()
+
+            # RSI (14-period)
+            delta = stocks_df['close'].diff()
+            gain = delta.where(delta > 0, 0.0).rolling(14).mean()
+            loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+            stocks_df['rsi_14'] = 100 - (100 / (1 + gain / loss))
+
+        ticker_company = {
+            "TSLA": "Tesla", "AAPL": "Apple", "MSFT": "Microsoft",
+            "GOOGL": "Google", "DELL": "Dell",
+        }
+        news_cache = {}
         merged_data = []
 
         # 3. Process and merge each tweet
@@ -317,6 +408,8 @@ async def api_get_merged(ceo: str, ticker: str):
             stock_volume = None
             stock_open_close_diff = None
             next_day_direction = None
+            rsi_at_tweet = None
+            atr_at_tweet = None
             if not stocks_df.empty:
                 valid_stocks = stocks_df[stocks_df['date_only'] >= target_date_only]
                 if not valid_stocks.empty:
@@ -327,6 +420,21 @@ async def api_get_merged(ceo: str, ticker: str):
                     if len(valid_stocks) >= 2:
                         next_close = float(valid_stocks['close'].iloc[1])
                         next_day_direction = 1 if next_close > stock_close else 0
+                    rsi_val = valid_stocks['rsi_14'].iloc[0]
+                    atr_val = valid_stocks['atr_14'].iloc[0]
+                    rsi_at_tweet = float(rsi_val) if not pd.isna(rsi_val) else None
+                    atr_at_tweet = float(atr_val) if not pd.isna(atr_val) else None
+
+            news_key = (ticker, target_date_only.isoformat())
+            if news_key not in news_cache:
+                company = ticker_company.get(ticker.upper(), ticker)
+                articles = get_news_for_date(ticker, company, target_date_only)
+                if articles:
+                    scores = [get_sentiment_score(a['title']) for a in articles]
+                    news_cache[news_key] = round(sum(scores) / len(scores), 4)
+                else:
+                    news_cache[news_key] = None
+            news_sentiment_score = news_cache[news_key]
 
             merged_data.append({
                 "date": tweet_date.isoformat(),
@@ -346,6 +454,9 @@ async def api_get_merged(ceo: str, ticker: str):
                 "tweet_hour": int(row.get('tweet_hour', 0)),
                 "is_premarket": bool(row.get('is_premarket', False)),
                 "next_day_direction": next_day_direction,
+                "rsi_at_tweet": rsi_at_tweet,
+                "atr_at_tweet": atr_at_tweet,
+                "news_sentiment_score": news_sentiment_score,
             })
 
         return {"status": "success", "data": merged_data}

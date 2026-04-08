@@ -17,3 +17,4 @@ pytz
 pytest
 pytest-asyncio
 httpx
+scikit-learn

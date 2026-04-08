@@ -18,6 +18,10 @@ SECTOR_ETF_MAP = {
     "AMZN":  "XLY",
     "META":  "XLK",
     "NVDA":  "XLK",
+    "AMD":   "XLK",
+    "ABNB":  "XLY",
+    "UBER":  "XLY",
+    "DIS":   "XLY",
 }
 
 def get_sector_etf(ticker):
