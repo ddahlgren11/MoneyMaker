@@ -65,6 +65,14 @@ class MergedRecord(Base):
     stock_close = Column(Float)
     stock_volume = Column(Float)
     stock_open_close_diff = Column(Float)
+    # Engagement signals
+    likes = Column(Integer)
+    retweet_count = Column(Integer)
+    view_count = Column(Integer)
+    reply_count = Column(Integer)
+    # Timing signals
+    tweet_hour = Column(Integer)
+    is_premarket = Column(Integer)  # stored as 0/1
 
 # Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
@@ -169,7 +177,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                         stock_volume = float(valid_stocks['volume'].iloc[0])
                         stock_open = float(valid_stocks['open'].iloc[0])
                         stock_open_close_diff = float(stock_open - stock_close)
-                
+
                 new_record = MergedRecord(
                     date=tweet_date.isoformat(),
                     ceo=username,
@@ -181,7 +189,13 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                     stock_ticker=ticker,
                     stock_close=stock_close,
                     stock_volume=stock_volume,
-                    stock_open_close_diff=stock_open_close_diff
+                    stock_open_close_diff=stock_open_close_diff,
+                    likes=int(row.get('likes', 0)),
+                    retweet_count=int(row.get('retweet_count', 0)),
+                    view_count=int(row.get('view_count', 0)),
+                    reply_count=int(row.get('reply_count', 0)),
+                    tweet_hour=int(row.get('tweet_hour', 0)),
+                    is_premarket=int(row.get('is_premarket', 0)),
                 )
                 db.add(new_record)
                 total_records += 1
@@ -309,7 +323,13 @@ async def api_get_merged(ceo: str, ticker: str):
                 "tweet_type": get_tweet_type(text),
                 "stock_close": stock_close,
                 "stock_volume": stock_volume,
-                "stock_open_close_diff": stock_open_close_diff
+                "stock_open_close_diff": stock_open_close_diff,
+                "likes": int(row.get('likes', 0)),
+                "retweet_count": int(row.get('retweet_count', 0)),
+                "view_count": int(row.get('view_count', 0)),
+                "reply_count": int(row.get('reply_count', 0)),
+                "tweet_hour": int(row.get('tweet_hour', 0)),
+                "is_premarket": bool(row.get('is_premarket', False)),
             })
 
         return {"status": "success", "data": merged_data}

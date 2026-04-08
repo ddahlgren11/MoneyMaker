@@ -27,16 +27,22 @@ SAMPLE_TWEETS_DF = pd.DataFrame([
         "date": pd.Timestamp("2024-01-15 10:00:00", tz="UTC"),
         "text": "Excited about our new product launch! Big things coming.",
         "sentiment": 0.8,
+        "likes": 45000, "retweet_count": 8200, "view_count": 3100000, "reply_count": 1200,
+        "tweet_hour": 10, "is_premarket": True,
     },
     {
-        "date": pd.Timestamp("2024-01-10 14:30:00", tz="UTC"),
+        "date": pd.Timestamp("2024-01-10 16:00:00", tz="UTC"),
         "text": "Quarterly results exceeded expectations.",
         "sentiment": 0.55,
+        "likes": 12000, "retweet_count": 2100, "view_count": 800000, "reply_count": 430,
+        "tweet_hour": 16, "is_premarket": False,
     },
     {
         "date": pd.Timestamp("2024-01-06 09:00:00", tz="UTC"),  # Saturday → Monday shift tested
         "text": "Weekend thoughts on innovation.",
         "sentiment": 0.1,
+        "likes": 3000, "retweet_count": 500, "view_count": 200000, "reply_count": 90,
+        "tweet_hour": 9, "is_premarket": True,
     },
 ])
 

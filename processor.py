@@ -34,15 +34,39 @@ class DataProcessor:
             os.getenv("ALPACA_SECRET_KEY")
         )
 
+    @staticmethod
+    def _safe_int(value):
+        """Convert engagement counts to int, returning 0 for None/'Unavailable'/etc."""
+        try:
+            return int(value or 0)
+        except (ValueError, TypeError):
+            return 0
+
     async def get_tweets(self, username):
         all_tweets = []
         user_tweets = await self.twitter_client.get_tweets(username, pages=2)
         for tweet in user_tweets:
+            # Skip retweets — they reflect someone else's words, not the CEO's
+            if tweet.is_retweet:
+                continue
+
+            created = tweet.created_on
+            tweet_hour = created.hour if hasattr(created, 'hour') else 0
+            tweet_minute = created.minute if hasattr(created, 'minute') else 0
+            # NYSE opens 9:30 ET = 14:30 UTC, closes 16:00 ET = 21:00 UTC
+            is_premarket = tweet_hour < 14 or (tweet_hour == 14 and tweet_minute < 30)
+
             all_tweets.append({
                 'ceo': username,
                 'text': tweet.text,
                 'sentiment': get_sentiment_score(tweet.text),
-                'date': tweet.created_on
+                'date': created,
+                'likes': self._safe_int(tweet.likes),
+                'retweet_count': self._safe_int(tweet.retweet_counts),
+                'view_count': self._safe_int(tweet.views),
+                'reply_count': self._safe_int(tweet.reply_counts),
+                'tweet_hour': tweet_hour,
+                'is_premarket': is_premarket,
             })
         return pd.DataFrame(all_tweets)
 
