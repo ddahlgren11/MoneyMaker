@@ -73,6 +73,8 @@ class MergedRecord(Base):
     # Timing signals
     tweet_hour = Column(Integer)
     is_premarket = Column(Integer)  # stored as 0/1
+    # Prediction target
+    next_day_direction = Column(Integer, nullable=True)  # 1 = up, 0 = down, NULL = no next-day data
 
 # Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
@@ -170,6 +172,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                 stock_close = 0.0
                 stock_volume = 0.0
                 stock_open_close_diff = 0.0
+                next_day_direction = None
                 if not stocks_df.empty:
                     valid_stocks = stocks_df[stocks_df['date_only'] >= target_date_only]
                     if not valid_stocks.empty:
@@ -177,6 +180,9 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                         stock_volume = float(valid_stocks['volume'].iloc[0])
                         stock_open = float(valid_stocks['open'].iloc[0])
                         stock_open_close_diff = float(stock_open - stock_close)
+                        if len(valid_stocks) >= 2:
+                            next_close = float(valid_stocks['close'].iloc[1])
+                            next_day_direction = 1 if next_close > stock_close else 0
 
                 new_record = MergedRecord(
                     date=tweet_date.isoformat(),
@@ -196,6 +202,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                     reply_count=int(row.get('reply_count', 0)),
                     tweet_hour=int(row.get('tweet_hour', 0)),
                     is_premarket=int(row.get('is_premarket', 0)),
+                    next_day_direction=next_day_direction,
                 )
                 db.add(new_record)
                 total_records += 1
@@ -305,6 +312,7 @@ async def api_get_merged(ceo: str, ticker: str):
             stock_close = None
             stock_volume = None
             stock_open_close_diff = None
+            next_day_direction = None
             if not stocks_df.empty:
                 valid_stocks = stocks_df[stocks_df['date_only'] >= target_date_only]
                 if not valid_stocks.empty:
@@ -312,6 +320,9 @@ async def api_get_merged(ceo: str, ticker: str):
                     stock_volume = float(valid_stocks['volume'].iloc[0])
                     stock_open = float(valid_stocks['open'].iloc[0])
                     stock_open_close_diff = float(stock_open - stock_close)
+                    if len(valid_stocks) >= 2:
+                        next_close = float(valid_stocks['close'].iloc[1])
+                        next_day_direction = 1 if next_close > stock_close else 0
 
             merged_data.append({
                 "date": tweet_date.isoformat(),
@@ -330,6 +341,7 @@ async def api_get_merged(ceo: str, ticker: str):
                 "reply_count": int(row.get('reply_count', 0)),
                 "tweet_hour": int(row.get('tweet_hour', 0)),
                 "is_premarket": bool(row.get('is_premarket', False)),
+                "next_day_direction": next_day_direction,
             })
 
         return {"status": "success", "data": merged_data}
