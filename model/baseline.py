@@ -100,7 +100,7 @@ print()
 
 lr = Pipeline([
     ('prep', preprocessor),
-    ('model', LogisticRegression(max_iter=1000, random_state=42)),
+    ('model', LogisticRegression(max_iter=1000, random_state=42, class_weight='balanced')),
 ])
 lr.fit(X_train, y_train)
 lr_preds = lr.predict(X_test)
