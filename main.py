@@ -1,10 +1,12 @@
 import os
+import time
 import logging
 import pandas as pd
 from datetime import timedelta, datetime, date as date_type
 from typing import List
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.ext.declarative import declarative_base
@@ -84,6 +86,12 @@ class StockRecord(Base):
     close = Column(Float)
     volume = Column(Float)
 
+class NewsSentimentCache(Base):
+    __tablename__ = "news_sentiment_cache"
+    ticker   = Column(String, primary_key=True)
+    date_str = Column(String, primary_key=True)  # YYYY-MM-DD
+    sentiment_score = Column(Float)
+
 class MergedRecord(Base):
     __tablename__ = "merged_data"
     id = Column(Integer, primary_key=True, index=True)
@@ -151,6 +159,12 @@ class MergedSchema(BaseModel):
     open_close_diff: float
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 proc = DataProcessor()
 
 # --- ACTIVE "CONTROLLER" ENDPOINT ---
@@ -248,22 +262,44 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                 loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
                 stocks_df['rsi_14'] = 100 - (100 / (1 + gain / loss))
 
-            # 2d. Fetch all news for this ticker in ONE bulk call, keyed by date string.
-            # Finnhub free tier covers ~1 year; older dates will simply be absent (None).
-            news_lookup = build_news_sentiment_lookup(
-                ticker,
-                start_date=min_date,
-                end_date=max_date,
-                get_sentiment_fn=get_sentiment_score,
-            )
+            # 2d. Build news sentiment lookup — one AV call per ticker (sort=EARLIEST),
+            # cached to DB so re-runs don't burn the 25 req/day limit.
+            tweet_date_objects = set(tweets_df['date'].dt.date)
+
+            cached_rows = db.query(NewsSentimentCache).filter(
+                NewsSentimentCache.ticker == ticker
+            ).all()
+            news_lookup = {r.date_str: r.sentiment_score for r in cached_rows}
+
+            cached_date_objs = {date_type.fromisoformat(d) for d in news_lookup}
+            uncached_dates = tweet_date_objects - cached_date_objs
+
+            if uncached_dates:
+                new_lookup = build_news_sentiment_lookup(
+                    ticker,
+                    tweet_dates=uncached_dates,
+                    get_sentiment_fn=get_sentiment_score,
+                )
+                # Respect AV's 1-req/sec burst limit between tickers.
+                time.sleep(1.1)
+                if new_lookup:
+                    for date_str, score in new_lookup.items():
+                        cached = db.get(NewsSentimentCache, (ticker, date_str))
+                        if cached is None:
+                            db.add(NewsSentimentCache(ticker=ticker, date_str=date_str, sentiment_score=score))
+                        else:
+                            cached.sentiment_score = score
+                    db.flush()
+                    news_lookup.update(new_lookup)
+
             if news_lookup:
                 lookup_dates = sorted(news_lookup.keys())
-                tweet_dates = set(tweets_df['date'].dt.date.apply(lambda d: d.isoformat()))
-                hits = tweet_dates & set(lookup_dates)
+                tweet_date_strs = {d.isoformat() for d in tweet_date_objects}
+                hits = tweet_date_strs & set(lookup_dates)
                 logging.warning("News lookup %s: %d dates in lookup (%s → %s), %d tweet dates, %d overlap",
                                 ticker, len(lookup_dates),
                                 lookup_dates[0], lookup_dates[-1],
-                                len(tweet_dates), len(hits))
+                                len(tweet_date_strs), len(hits))
             else:
                 logging.warning("News lookup %s: empty — all news_sentiment_score will be NULL", ticker)
 

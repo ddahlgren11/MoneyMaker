@@ -129,6 +129,7 @@ def _av_news_sentiment_lookup(ticker, start_date, end_date):
                 "time_from": start_date.strftime("%Y%m%dT0000"),
                 "time_to":   end_date.strftime("%Y%m%dT2359"),
                 "limit":     1000,
+                "sort":      "EARLIEST",
                 "apikey":    _AV_KEY,
             },
             timeout=30,
@@ -177,27 +178,11 @@ def _av_news_sentiment_lookup(ticker, start_date, end_date):
         return {}
 
 
-def build_news_sentiment_lookup(ticker, start_date, end_date, get_sentiment_fn):
+def _finnhub_bulk_lookup(ticker, start_date, end_date, get_sentiment_fn):
     """
-    Returns {date_str: avg_sentiment_score} for the given ticker and date range.
-
-    Strategy (in order):
-    1. Alpha Vantage NEWS_SENTIMENT — pre-built per-ticker scores, years of history,
-       25 free calls/day. Set ALPHA_VANTAGE_API_KEY in .env to enable.
-    2. Finnhub bulk — fallback; free tier limited to ~1 year of history.
-
-    Dates not covered by either source will be absent (callers treat as None).
-    start_date / end_date: date-like objects with .strftime().
-    get_sentiment_fn: callable(text) -> float, used only for the Finnhub fallback.
+    Fetches Finnhub news for a date range and returns {date_str: avg_sentiment}.
+    Free tier is limited to ~1 year of history.
     """
-    # 1. Try Alpha Vantage first — better historical coverage
-    if _AV_KEY:
-        lookup = _av_news_sentiment_lookup(ticker, start_date, end_date)
-        if lookup:
-            return lookup
-        logger.info("AlphaVantage %s returned no data, falling back to Finnhub", ticker)
-
-    # 2. Finnhub fallback
     if not _FINNHUB_KEY:
         return {}
     try:
@@ -245,3 +230,33 @@ def build_news_sentiment_lookup(ticker, start_date, end_date, get_sentiment_fn):
     except Exception as exc:
         logger.error("Finnhub bulk %s: exception — %s", ticker, exc)
         return {}
+
+
+def build_news_sentiment_lookup(ticker, tweet_dates, get_sentiment_fn):
+    """
+    Returns {date_str: avg_sentiment_score} for the given ticker, targeted at
+    the supplied tweet_dates (a set/list of date objects).
+
+    Makes ONE AV call per ticker using the actual tweet date range as the window
+    and sort=EARLIEST, so the 1000-article cap covers the oldest part of the
+    tweet history rather than the most-recent window.  Falls back to a single
+    Finnhub call if AV is unavailable or rate-limited.
+
+    Dates not covered by either source will be absent (callers treat as None).
+    get_sentiment_fn: callable(text) -> float, used only for the Finnhub path.
+    """
+    if not tweet_dates:
+        return {}
+
+    start_date = min(tweet_dates)
+    end_date   = max(tweet_dates)
+
+    # 1. Try Alpha Vantage — one call, sort=EARLIEST targets the oldest tweet dates.
+    if _AV_KEY:
+        lookup = _av_news_sentiment_lookup(ticker, start_date, end_date)
+        if lookup:
+            return lookup
+        logger.info("AlphaVantage %s returned no data, falling back to Finnhub", ticker)
+
+    # 2. Finnhub fallback — one bulk call over the same window.
+    return _finnhub_bulk_lookup(ticker, start_date, end_date, get_sentiment_fn)
