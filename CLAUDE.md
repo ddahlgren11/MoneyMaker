@@ -15,7 +15,7 @@ uvicorn main:app --reload
 streamlit run app.py
 
 # Environment variables required in .env
-# DATABASE_URL, ALPACA_API_KEY, ALPACA_SECRET_KEY
+# DATABASE_URL, ALPACA_API_KEY, ALPACA_SECRET_KEY, FINNHUB_API_KEY
 ```
 
 No test framework or linter is currently configured.

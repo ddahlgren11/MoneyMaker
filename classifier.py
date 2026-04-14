@@ -14,8 +14,18 @@ def get_refined_sentiment(score):
 
 def get_tone_category(text, score):
     text_lower = text.lower()
-    emo_kws = ["excited", "happy", "joyful", "amazing", "angry", "sad"]
-    info_kws = ["announcement", "launch", "update", "issue", "statement"]
+    emo_kws = [
+        "excited", "exciting", "happy", "joyful", "amazing", "awesome",
+        "incredible", "fantastic", "thrilled", "proud", "love", "great",
+        "angry", "angry", "sad", "disappointed", "terrible", "horrible",
+        "outraged", "furious", "disgusted", "frustrated", "upset",
+    ]
+    info_kws = [
+        "announcement", "announce", "announcing", "launch", "launching",
+        "update", "issue", "statement", "report", "release", "introducing",
+        "partnership", "deal", "acquisition", "earnings", "quarterly",
+        "revenue", "profit", "guidance", "forecast", "milestone",
+    ]
 
     is_emotional = any(kw in text_lower for kw in emo_kws)
     is_informational = any(kw in text_lower for kw in info_kws)
@@ -30,7 +40,11 @@ def get_tone_category(text, score):
 
 def get_tweet_type(text):
     text_lower = text.lower()
-    if any(kw in text_lower for kw in ["poll", "vote"]): return 'Poll/Vote'
-    if any(kw in text_lower for kw in ["thoughts", "discuss"]): return 'Discussion Starter'
-    if any(kw in text_lower for kw in ["launch", "event", "update"]): return 'Company Milestone'
+    if any(kw in text_lower for kw in ["poll", "vote", "voting"]): return 'Poll/Vote'
+    if any(kw in text_lower for kw in ["thoughts", "discuss", "opinion", "what do you", "agree", "disagree"]): return 'Discussion Starter'
+    if any(kw in text_lower for kw in [
+        "launch", "event", "update", "announce", "partnership", "deal",
+        "acquisition", "earnings", "milestone", "record", "release", "new product",
+    ]): return 'Company Milestone'
+    if any(kw in text_lower for kw in ["thanks", "thank you", "congrats", "congratulations", "welcome"]): return 'Acknowledgment'
     return 'Personal/General Commentary'

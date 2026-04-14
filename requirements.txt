@@ -11,7 +11,7 @@ vaderSentiment
 alpaca-py 
 streamlit
 plotly
-newsapi-python
+requests
 yfinance
 pytz
 pytest

@@ -1,6 +1,7 @@
 import os
+import logging
 import pandas as pd
-from datetime import timedelta
+from datetime import timedelta, datetime, date as date_type
 from typing import List
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException
@@ -9,14 +10,45 @@ from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
-import pandas as pd
+import yfinance as yf
 
 # Import the logic from your new files
 from processor import DataProcessor
 from classifier import get_refined_sentiment, get_tone_category, get_tweet_type, get_sentiment_score
-from context import get_news_for_date
+from context import get_news_for_date, get_earnings_dates, build_news_sentiment_lookup  # get_news_for_date used in /api/merged
 
 load_dotenv()
+
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("context").setLevel(logging.DEBUG)
+
+# --- HELPERS ---
+
+def _build_vix_lookup(start_date, end_date):
+    """Returns a dict of {date: vix_close} for the given range, or {} on failure."""
+    try:
+        vix = yf.download("^VIX", start=start_date, end=end_date + timedelta(days=1),
+                          auto_adjust=True, progress=False)
+        if vix.empty:
+            return {}
+        # Flatten MultiIndex columns if present
+        if isinstance(vix.columns, pd.MultiIndex):
+            vix.columns = vix.columns.get_level_values(0)
+        return {d.date(): float(v) for d, v in zip(vix.index, vix["Close"])}
+    except Exception:
+        return {}
+
+
+def _days_to_nearest_earnings(target_date, earnings_set):
+    """Returns calendar days to the nearest earnings date, or None if unknown."""
+    if not earnings_set:
+        return None
+    if isinstance(target_date, datetime):
+        target_date = target_date.date()
+    diffs = [abs((datetime.strptime(d, "%Y-%m-%d").date() - target_date).days)
+             for d in earnings_set]
+    return min(diffs)
+
 
 # --- DATABASE SETUP ---
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -81,6 +113,9 @@ class MergedRecord(Base):
     atr_at_tweet = Column(Float, nullable=True)
     # News sentiment on tweet day
     news_sentiment_score = Column(Float, nullable=True)
+    # Market context
+    vix_at_tweet = Column(Float, nullable=True)       # VIX on tweet day — market fear level
+    days_to_earnings = Column(Integer, nullable=True)  # calendar days to nearest earnings date
 
 # Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
@@ -154,9 +189,6 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         "DIS": "Disney",
     }
 
-    # Cache news scores by (ticker, date) — one NewsAPI call per day, not per tweet
-    news_cache = {}
-    
     total_records = 0
 
     try:
@@ -176,12 +208,21 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                 continue
 
             tweets_df = tweets_df.sort_values(by='date', ascending=False)
+            tweets_df = tweets_df.dropna(subset=['date'])
+            if tweets_df.empty:
+                continue
 
             # Extra 30-day lookback so RSI/ATR rolling windows are valid from the first tweet
             min_date = tweets_df['date'].min() - timedelta(days=30)
             max_date = tweets_df['date'].max() + timedelta(days=5)
 
-            # 2. Fetch Stock Data for the associated ticker
+            # 2a. Fetch VIX for this date range (market fear context)
+            vix_lookup = _build_vix_lookup(min_date, max_date)
+
+            # 2b. Fetch earnings dates for this ticker
+            earnings_set = get_earnings_dates(ticker)
+
+            # 2c. Fetch Stock Data for the associated ticker
             stocks_df = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
 
             if not stocks_df.empty:
@@ -206,7 +247,26 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                 gain = delta.where(delta > 0, 0.0).rolling(14).mean()
                 loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
                 stocks_df['rsi_14'] = 100 - (100 / (1 + gain / loss))
-            
+
+            # 2d. Fetch all news for this ticker in ONE bulk call, keyed by date string.
+            # Finnhub free tier covers ~1 year; older dates will simply be absent (None).
+            news_lookup = build_news_sentiment_lookup(
+                ticker,
+                start_date=min_date,
+                end_date=max_date,
+                get_sentiment_fn=get_sentiment_score,
+            )
+            if news_lookup:
+                lookup_dates = sorted(news_lookup.keys())
+                tweet_dates = set(tweets_df['date'].dt.date.apply(lambda d: d.isoformat()))
+                hits = tweet_dates & set(lookup_dates)
+                logging.warning("News lookup %s: %d dates in lookup (%s → %s), %d tweet dates, %d overlap",
+                                ticker, len(lookup_dates),
+                                lookup_dates[0], lookup_dates[-1],
+                                len(tweet_dates), len(hits))
+            else:
+                logging.warning("News lookup %s: empty — all news_sentiment_score will be NULL", ticker)
+
             # 3. Process and merge each tweet
             for _, row in tweets_df.iterrows():
                 sentiment = float(row['sentiment'])
@@ -243,17 +303,19 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                         rsi_at_tweet = float(rsi_val) if not pd.isna(rsi_val) else None
                         atr_at_tweet = float(atr_val) if not pd.isna(atr_val) else None
 
-                # News sentiment — cached per (ticker, date) to stay within API rate limits
-                news_key = (ticker, target_date_only.isoformat())
-                if news_key not in news_cache:
-                    company = ticker_company.get(ticker, ticker)
-                    articles = get_news_for_date(ticker, company, target_date_only)
-                    if articles:
-                        scores = [get_sentiment_score(a['title']) for a in articles]
-                        news_cache[news_key] = round(sum(scores) / len(scores), 4)
-                    else:
-                        news_cache[news_key] = None
-                news_sentiment_score = news_cache[news_key]
+                # News sentiment — look up from the bulk fetch done once per ticker
+                news_sentiment_score = news_lookup.get(target_date_only.isoformat())
+
+                # VIX on tweet day — fall back to nearest available day if weekend/holiday
+                vix_at_tweet = vix_lookup.get(target_date_only)
+                if vix_at_tweet is None:
+                    for offset in range(1, 4):
+                        vix_at_tweet = vix_lookup.get(target_date_only - timedelta(days=offset))
+                        if vix_at_tweet is not None:
+                            break
+
+                # Days to nearest earnings date
+                days_to_earnings = _days_to_nearest_earnings(target_date_only, earnings_set)
 
                 new_record = MergedRecord(
                     date=tweet_date.isoformat(),
@@ -277,6 +339,8 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                     rsi_at_tweet=rsi_at_tweet,
                     atr_at_tweet=atr_at_tweet,
                     news_sentiment_score=news_sentiment_score,
+                    vix_at_tweet=vix_at_tweet,
+                    days_to_earnings=days_to_earnings,
                 )
                 db.add(new_record)
                 total_records += 1
@@ -351,6 +415,9 @@ async def api_get_merged(ceo: str, ticker: str):
             return {"status": "success", "data": []}
 
         tweets_df = tweets_df.sort_values(by='date', ascending=False)
+        tweets_df = tweets_df.dropna(subset=['date'])
+        if tweets_df.empty:
+            return {"status": "success", "data": []}
 
         # Extra 30-day lookback so RSI/ATR rolling windows are valid from the first tweet
         min_date = tweets_df['date'].min() - timedelta(days=30)
