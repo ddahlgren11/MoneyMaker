@@ -137,9 +137,6 @@ async def run():
     skipped       = []
 
     try:
-        db.query(MergedRecord).delete()
-        db.flush()
-
         for username, ticker in TARGETS.items():
             print(f"\n── {username} / {ticker} ──")
 
@@ -158,7 +155,19 @@ async def run():
             if tweets_df.empty:
                 continue
 
-            print(f"  {len(tweets_df)} tweets fetched")
+            # Load timestamps already in the DB for this CEO so we don't double-insert
+            existing_dates = {
+                r.date for r in
+                db.query(MergedRecord.date).filter(MergedRecord.ceo == username).all()
+            }
+            tweets_df = tweets_df[
+                ~tweets_df["date"].apply(lambda d: d.isoformat()).isin(existing_dates)
+            ]
+            if tweets_df.empty:
+                print("  SKIP: all tweets already in DB")
+                continue
+
+            print(f"  {len(tweets_df)} new tweets (skipped {len(existing_dates)} already stored)")
 
             min_date    = tweets_df["date"].min() - timedelta(days=30)
             max_date    = tweets_df["date"].max() + timedelta(days=5)
@@ -283,7 +292,7 @@ async def run():
                 ticker_records += 1
 
             total_records += ticker_records
-            print(f"  {ticker_records} records written")
+            print(f"  {ticker_records} new records written")
 
         db.commit()
         print(f"\nDone — {total_records} total records, {len(skipped)} skipped")
