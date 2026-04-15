@@ -26,6 +26,9 @@ SECTOR_ETF_MAP = {
     "ABNB":  "XLY",
     "UBER":  "XLY",
     "DIS":   "XLY",
+    "SQ":    "XLK",
+    "SHOP":  "XLK",
+    "COIN":  "XLK",
 }
 
 def get_sector_etf(ticker):

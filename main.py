@@ -179,16 +179,21 @@ async def process_and_save_all(db: Session = Depends(get_db)):
     """
     # Map of CEO usernames to their respective Stock Tickers
     targets = {
-        "elonmusk": "TSLA",
-        "tim_cook": "AAPL",
-        "satyanadella": "MSFT",
-        "sundarpichai": "GOOGL",
-        "MichaelDell": "DELL",
-        "LisaSu": "AMD",
-        "ajassy": "AMZN",
-        "bchesky": "ABNB",
-        "dkhos": "UBER",
-        "RobertIger": "DIS",
+        "elonmusk":       "TSLA",
+        "tim_cook":       "AAPL",
+        "satyanadella":   "MSFT",
+        "sundarpichai":   "GOOGL",
+        "MichaelDell":    "DELL",
+        "LisaSu":         "AMD",
+        "ajassy":         "AMZN",
+        "bchesky":        "ABNB",
+        "dkhos":          "UBER",
+        "RobertIger":     "DIS",
+        "zuck":           "META",
+        "jensenhuang":    "NVDA",
+        "jack":           "SQ",
+        "tobi":           "SHOP",
+        "brian_armstrong": "COIN",
     }
 
     # Company names for news queries
