@@ -42,9 +42,9 @@ class DataProcessor:
         except (ValueError, TypeError):
             return 0
 
-    async def get_tweets(self, username):
+    async def get_tweets(self, username, pages=10):
         all_tweets = []
-        user_tweets = await self.twitter_client.get_tweets(username, pages=10)
+        user_tweets = await self.twitter_client.get_tweets(username, pages=pages)
         for tweet in user_tweets:
             # Skip retweets — they reflect someone else's words, not the CEO's
             if tweet.is_retweet:

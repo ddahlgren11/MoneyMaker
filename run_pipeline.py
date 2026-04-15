@@ -2,18 +2,29 @@
 Standalone pipeline runner — fetches fresh tweets + stocks + news for all
 CEOs, writes merged records to Neon, then exits.
 
-Used by the GitHub Actions daily workflow so no FastAPI server is needed:
+Daily run (GitHub Actions):
     python3 run_pipeline.py
 
-Fully self-contained: does not import from main.py so missing env vars at
-import time won't crash the process before load_dotenv() runs.
+One-time historical backfill (run manually):
+    python3 run_pipeline.py --pages 50
+
+--pages controls how many pages of tweets are fetched per CEO.
+Each page is ~20 tweets.  Default is 20 (~400 tweets per CEO).
+For a full backfill use 50-100 to pull years of history.
 """
+import argparse
 import asyncio
 import logging
 import os
 import sys
 import time
 from datetime import timedelta, datetime, date as date_type
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--pages", type=int, default=20,
+                    help="Pages of tweets to fetch per CEO (each page ~20 tweets)")
+args = parser.parse_args()
+PAGES = args.pages
 
 import pandas as pd
 import yfinance as yf
@@ -136,12 +147,15 @@ async def run():
     total_records = 0
     skipped       = []
 
+    print(f"Pages per CEO: {PAGES}  (~{PAGES * 20} tweets max per CEO)")
+    print(f"Mode: {'BACKFILL' if PAGES > 20 else 'daily'}\n")
+
     try:
         for username, ticker in TARGETS.items():
             print(f"\n── {username} / {ticker} ──")
 
             try:
-                tweets_df = await proc.get_tweets(username)
+                tweets_df = await proc.get_tweets(username, pages=PAGES)
             except Exception as exc:
                 skipped.append({"username": username, "reason": str(exc)})
                 print(f"  SKIP: {exc}")
