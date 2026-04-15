@@ -192,8 +192,7 @@ print(f"  {'Naive baseline':<25s}  {naive_cv.mean():.3f} ±{naive_cv.std():.3f} 
 
 cv_results = {}
 for name, pipeline in models.items():
-    scores = cross_val_score(pipeline, X, y, cv=tscv, scoring='accuracy',
-                             fit_params={'model__sample_weight': sample_weights})
+    scores = cross_val_score(pipeline, X, y, cv=tscv, scoring='accuracy')
     cv_results[name] = scores
     delta = scores.mean() - naive_cv.mean()
     fold_str = "  ".join([f"{s:.3f}" for s in scores])
