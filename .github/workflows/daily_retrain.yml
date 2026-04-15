@@ -31,6 +31,13 @@ jobs:
       - name: Download TextBlob corpora
         run: python -m textblob.download_corpora
 
+      - name: Debug DATABASE_URL
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          echo "Length: ${#DATABASE_URL}"
+          echo "Prefix: ${DATABASE_URL:0:20}"
+
       - name: Fetch fresh data (tweets + stocks + news)
         env:
           DATABASE_URL:          ${{ secrets.DATABASE_URL }}
