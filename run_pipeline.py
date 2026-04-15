@@ -5,34 +5,75 @@ CEOs, writes merged records to Neon, then exits.
 Used by the GitHub Actions daily workflow so no FastAPI server is needed:
     python3 run_pipeline.py
 
-Imports DB models and helpers directly from main.py to avoid duplication.
+Fully self-contained: does not import from main.py so missing env vars at
+import time won't crash the process before load_dotenv() runs.
 """
 import asyncio
 import logging
-import time
+import os
 import sys
+import time
+from datetime import timedelta, datetime, date as date_type
+
 import pandas as pd
-from datetime import timedelta, date as date_type
+import yfinance as yf
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, Column, Integer, String, Float
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
 
 load_dotenv()
 
-# Import DB setup and helpers from main without starting the HTTP server.
-# main.py's module-level code (create_engine, create_all, DataProcessor init)
-# runs on import — that's fine for a CLI script.
-from main import (
-    SessionLocal,
-    MergedRecord,
-    NewsSentimentCache,
-    _build_vix_lookup,
-    _days_to_nearest_earnings,
-    proc,
-)
-from classifier import (
-    get_refined_sentiment, get_tone_category,
-    get_tweet_type, get_sentiment_score,
-)
-from context import get_earnings_dates, build_news_sentiment_lookup
+# ── Validate required env vars before going further ───────────────────────────
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    print("FATAL: DATABASE_URL is not set.", file=sys.stderr)
+    sys.exit(1)
+
+# ── DB setup ──────────────────────────────────────────────────────────────────
+engine       = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
+SessionLocal = sessionmaker(bind=engine)
+Base         = declarative_base()
+
+class MergedRecord(Base):
+    __tablename__ = "merged_data"
+    id                   = Column(Integer, primary_key=True, index=True)
+    date                 = Column(String)
+    ceo                  = Column(String)
+    tweet_text           = Column(String)
+    sentiment_score      = Column(Float)
+    refined_sentiment    = Column(String)
+    tone_category        = Column(String)
+    tweet_type           = Column(String)
+    stock_ticker         = Column(String)
+    stock_close          = Column(Float)
+    stock_volume         = Column(Float)
+    stock_open_close_diff= Column(Float)
+    likes                = Column(Integer)
+    retweet_count        = Column(Integer)
+    view_count           = Column(Integer)
+    reply_count          = Column(Integer)
+    tweet_hour           = Column(Integer)
+    is_premarket         = Column(Integer)
+    next_day_direction   = Column(Integer, nullable=True)
+    rsi_at_tweet         = Column(Float,   nullable=True)
+    atr_at_tweet         = Column(Float,   nullable=True)
+    news_sentiment_score = Column(Float,   nullable=True)
+    vix_at_tweet         = Column(Float,   nullable=True)
+    days_to_earnings     = Column(Integer, nullable=True)
+
+class NewsSentimentCache(Base):
+    __tablename__ = "news_sentiment_cache"
+    ticker          = Column(String, primary_key=True)
+    date_str        = Column(String, primary_key=True)
+    sentiment_score = Column(Float)
+
+Base.metadata.create_all(bind=engine)
+
+# ── App imports (after env is validated) ─────────────────────────────────────
+from processor  import DataProcessor
+from classifier import get_refined_sentiment, get_tone_category, get_tweet_type, get_sentiment_score
+from context    import get_earnings_dates, build_news_sentiment_lookup
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -41,27 +82,55 @@ logging.basicConfig(
 )
 logging.getLogger("context").setLevel(logging.INFO)
 
+proc = DataProcessor()
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _build_vix_lookup(start_date, end_date):
+    try:
+        vix = yf.download("^VIX", start=start_date, end=end_date + timedelta(days=1),
+                          auto_adjust=True, progress=False)
+        if vix.empty:
+            return {}
+        if isinstance(vix.columns, pd.MultiIndex):
+            vix.columns = vix.columns.get_level_values(0)
+        return {d.date(): float(v) for d, v in zip(vix.index, vix["Close"])}
+    except Exception:
+        return {}
+
+
+def _days_to_nearest_earnings(target_date, earnings_set):
+    if not earnings_set:
+        return None
+    if isinstance(target_date, datetime):
+        target_date = target_date.date()
+    diffs = [abs((datetime.strptime(d, "%Y-%m-%d").date() - target_date).days)
+             for d in earnings_set]
+    return min(diffs)
+
+
+# ── Pipeline ──────────────────────────────────────────────────────────────────
+
 TARGETS = {
-    "elonmusk":    "TSLA",
-    "tim_cook":    "AAPL",
-    "satyanadella":"MSFT",
-    "sundarpichai":"GOOGL",
-    "MichaelDell": "DELL",
-    "LisaSu":      "AMD",
-    "ajassy":      "AMZN",
-    "bchesky":     "ABNB",
-    "dkhos":       "UBER",
-    "RobertIger":  "DIS",
+    "elonmusk":     "TSLA",
+    "tim_cook":     "AAPL",
+    "satyanadella": "MSFT",
+    "sundarpichai": "GOOGL",
+    "MichaelDell":  "DELL",
+    "LisaSu":       "AMD",
+    "ajassy":       "AMZN",
+    "bchesky":      "ABNB",
+    "dkhos":        "UBER",
+    "RobertIger":   "DIS",
 }
 
 
 async def run():
-    db = SessionLocal()
+    db            = SessionLocal()
     total_records = 0
-    skipped = []
+    skipped       = []
 
     try:
-        # Clear existing merged records so re-runs don't create duplicates.
         db.query(MergedRecord).delete()
         db.flush()
 
@@ -71,9 +140,8 @@ async def run():
             try:
                 tweets_df = await proc.get_tweets(username)
             except Exception as exc:
-                reason = str(exc)
-                skipped.append({"username": username, "reason": reason})
-                print(f"  SKIP: {reason}")
+                skipped.append({"username": username, "reason": str(exc)})
+                print(f"  SKIP: {exc}")
                 continue
 
             if tweets_df.empty:
@@ -86,21 +154,19 @@ async def run():
 
             print(f"  {len(tweets_df)} tweets fetched")
 
-            min_date = tweets_df["date"].min() - timedelta(days=30)
-            max_date = tweets_df["date"].max() + timedelta(days=5)
-
+            min_date    = tweets_df["date"].min() - timedelta(days=30)
+            max_date    = tweets_df["date"].max() + timedelta(days=5)
             vix_lookup  = _build_vix_lookup(min_date, max_date)
             earnings_set = get_earnings_dates(ticker)
             stocks_df   = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
 
             if not stocks_df.empty:
                 stocks_df = stocks_df.sort_index()
-                if isinstance(stocks_df.index, pd.MultiIndex):
-                    stock_dates = stocks_df.index.get_level_values("timestamp").date
-                else:
-                    stock_dates = stocks_df.index.date
-                stocks_df["date_only"] = stock_dates
-
+                stocks_df["date_only"] = (
+                    stocks_df.index.get_level_values("timestamp").date
+                    if isinstance(stocks_df.index, pd.MultiIndex)
+                    else stocks_df.index.date
+                )
                 stocks_df["prev_close"] = stocks_df["close"].shift(1)
                 stocks_df["tr"] = stocks_df[["high", "low", "prev_close"]].apply(
                     lambda r: max(r["high"] - r["low"],
@@ -108,27 +174,26 @@ async def run():
                                   abs(r["low"]  - r["prev_close"])), axis=1
                 )
                 stocks_df["atr_14"] = stocks_df["tr"].rolling(14).mean()
-
                 delta = stocks_df["close"].diff()
                 gain  = delta.where(delta > 0, 0.0).rolling(14).mean()
                 loss  = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
                 stocks_df["rsi_14"] = 100 - (100 / (1 + gain / loss))
 
-            # News sentiment — load cache, fetch only uncached tweet years.
+            # News sentiment — load cache, fetch only uncached tweet dates.
             tweet_date_objects = set(tweets_df["date"].dt.date)
-            cached_rows = db.query(NewsSentimentCache).filter(
+            cached_rows  = db.query(NewsSentimentCache).filter(
                 NewsSentimentCache.ticker == ticker
             ).all()
-            news_lookup = {r.date_str: r.sentiment_score for r in cached_rows}
-
+            news_lookup  = {r.date_str: r.sentiment_score for r in cached_rows}
             uncached_dates = tweet_date_objects - {date_type.fromisoformat(d) for d in news_lookup}
+
             if uncached_dates:
                 new_lookup = build_news_sentiment_lookup(
                     ticker,
                     tweet_dates=uncached_dates,
                     get_sentiment_fn=get_sentiment_score,
                 )
-                time.sleep(1.1)  # respect AV 1-req/sec burst limit
+                time.sleep(1.1)
                 if new_lookup:
                     for date_str, score in new_lookup.items():
                         cached = db.get(NewsSentimentCache, (ticker, date_str))
@@ -141,13 +206,11 @@ async def run():
 
             if news_lookup:
                 lookup_dates = sorted(news_lookup.keys())
-                tweet_date_strs = {d.isoformat() for d in tweet_date_objects}
-                overlap = tweet_date_strs & set(lookup_dates)
-                print(f"  news: {len(lookup_dates)} dates in lookup, {len(overlap)} overlap with tweets")
+                overlap = {d.isoformat() for d in tweet_date_objects} & set(lookup_dates)
+                print(f"  news: {len(lookup_dates)} dates, {len(overlap)} overlap")
             else:
-                print("  news: no coverage (news_sentiment_score will be NULL)")
+                print("  news: no coverage")
 
-            # Merge tweets with stock/context data and write to DB.
             ticker_records = 0
             for _, row in tweets_df.iterrows():
                 sentiment  = float(row["sentiment"])
@@ -218,9 +281,8 @@ async def run():
 
         db.commit()
         print(f"\nDone — {total_records} total records, {len(skipped)} skipped")
-        if skipped:
-            for s in skipped:
-                print(f"  skipped {s['username']}: {s['reason']}")
+        for s in skipped:
+            print(f"  skipped {s['username']}: {s['reason']}")
 
     except Exception as exc:
         db.rollback()
