@@ -1,0 +1,47 @@
+name: Daily Pipeline + Retrain
+
+on:
+  schedule:
+    - cron: '0 13 * * 1-5'  # 8am EST, weekdays only
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch fresh data (tweets + stocks + news)
+        env:
+          DATABASE_URL:          ${{ secrets.DATABASE_URL }}
+          ALPACA_API_KEY:        ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY:     ${{ secrets.ALPACA_SECRET_KEY }}
+          FINNHUB_API_KEY:       ${{ secrets.FINNHUB_API_KEY }}
+          ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+        run: python3 run_pipeline.py
+
+      - name: Retrain model on fresh data
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python3 model/baseline.py
+
+      - name: Commit updated model
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add model/trained_model.pkl
+          git diff --staged --quiet || git commit -m "chore: retrain model [$(date -u '+%Y-%m-%d')]"
+          git push

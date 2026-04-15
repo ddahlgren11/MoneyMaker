@@ -35,6 +35,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.calibration import CalibratedClassifierCV
 
 load_dotenv()
 
@@ -101,7 +102,7 @@ numeric_features = [
     'vix_at_tweet',                            # market fear level on tweet day
     'days_to_earnings',                        # proximity to earnings amplifies tweet impact
     'prev_day_direction',                      # momentum — did stock go up or down yesterday
-    'news_sentiment_score',                    # Finnhub headline sentiment on tweet day
+    'news_sentiment_score',                    # headline sentiment on tweet day
 ]
 categorical_features = ['refined_sentiment', 'tone_category', 'tweet_type']
 
@@ -264,8 +265,50 @@ elif best_cv_mean > naive_cv.mean():
 else:
     print(f"\n  No model consistently beats naive — features may need more work.")
 
-# ── Save best model (by CV mean, retrained on full 80% train set) ─────────────
+# ── Calibrate confidence scores ───────────────────────────────────────────────
+# TimeSeriesSplit ensures each calibration fold trains on data before its
+# calibration window — no lookahead, matches real deployment order.
+
+calibrated_model = CalibratedClassifierCV(
+    best_pipeline, method='isotonic', cv=TimeSeriesSplit(n_splits=5)
+)
+calibrated_model.fit(X_train, y_train)
+
+# Report calibrated accuracy on the holdout so we can see if calibration hurt accuracy.
+cal_probs = calibrated_model.predict_proba(X_test)
+cal_preds = calibrated_model.predict(X_test)
+cal_acc   = accuracy_score(y_test, cal_preds)
+print("=" * 50)
+print(f"Calibrated {best_cv_name} — Holdout")
+print("=" * 50)
+print(f"Accuracy: {cal_acc:.3f}  ({'+' if cal_acc > naive_holdout else ''}{cal_acc - naive_holdout:.3f} vs naive)")
+print(classification_report(y_test, cal_preds, target_names=['Down', 'Up']))
+
+# ── Confidence bucket analysis ────────────────────────────────────────────────
+# Are high-confidence predictions actually more accurate?
+# If yes, the confidence score is meaningful and you can filter on it.
+
+confidence = np.max(cal_probs, axis=1)
+correct     = (cal_preds == y_test.values).astype(int)
+
+buckets = [(0.50, 0.55), (0.55, 0.60), (0.60, 0.65), (0.65, 0.70), (0.70, 1.01)]
+print("=" * 50)
+print("Confidence Bucket Analysis")
+print("=" * 50)
+print(f"  {'Confidence':>15}  {'Count':>6}  {'% of test':>9}  {'Accuracy':>9}")
+for lo, hi in buckets:
+    mask = (confidence >= lo) & (confidence < hi)
+    n = mask.sum()
+    if n == 0:
+        continue
+    acc = correct[mask].mean()
+    label = f"{lo*100:.0f}–{min(hi, 1.0)*100:.0f}%"
+    print(f"  {label:>15}  {n:>6}  {n/len(y_test)*100:>8.1f}%  {acc:>9.3f}")
+print(f"  {'Overall':>15}  {len(y_test):>6}  {'100.0':>9}%  {cal_acc:>9.3f}")
+print()
+
+# ── Save calibrated model ─────────────────────────────────────────────────────
 
 model_path = os.path.join(os.path.dirname(__file__), "trained_model.pkl")
-joblib.dump(best_pipeline, model_path)
-print(f"\n  Saved {best_cv_name} (CV mean={best_cv_mean:.3f}) to {model_path}")
+joblib.dump(calibrated_model, model_path)
+print(f"  Saved calibrated {best_cv_name} (CV mean={best_cv_mean:.3f}) to {model_path}")
