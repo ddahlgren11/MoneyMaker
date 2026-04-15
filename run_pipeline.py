@@ -29,6 +29,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     print("FATAL: DATABASE_URL is not set.", file=sys.stderr)
     sys.exit(1)
+# Neon/Heroku connection strings often use postgres:// — SQLAlchemy requires postgresql://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # ── DB setup ──────────────────────────────────────────────────────────────────
 engine       = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
