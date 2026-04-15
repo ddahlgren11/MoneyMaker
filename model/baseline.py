@@ -109,6 +109,21 @@ categorical_features = ['refined_sentiment', 'tone_category', 'tweet_type']
 X = df[numeric_features + categorical_features]
 y = df['next_day_direction']
 
+# ── Sample weights — exponential decay so recent tweets matter more ───────────
+# Half-life of 180 days: a tweet from 6 months ago has 50% the weight of a
+# tweet from today.  Older data still contributes but has less influence, so
+# the model adapts to how CEOs are tweeting NOW rather than 2 years ago.
+HALF_LIFE_DAYS = 180
+reference_date  = pd.to_datetime(df["date"]).max()
+days_ago        = (reference_date - pd.to_datetime(df["date"])).dt.days.values
+decay_rate      = np.log(2) / HALF_LIFE_DAYS
+sample_weights  = np.exp(-decay_rate * days_ago)
+sample_weights  = sample_weights / sample_weights.mean()   # normalise: mean weight = 1
+
+print(f"Sample weights  min={sample_weights.min():.3f}  max={sample_weights.max():.3f}  "
+      f"(half-life={HALF_LIFE_DAYS} days)")
+print()
+
 # ── Preprocessing ─────────────────────────────────────────────────────────────
 
 # Two numeric pipelines: scaled (for LR) and unscaled (for tree models)
@@ -177,7 +192,8 @@ print(f"  {'Naive baseline':<25s}  {naive_cv.mean():.3f} ±{naive_cv.std():.3f} 
 
 cv_results = {}
 for name, pipeline in models.items():
-    scores = cross_val_score(pipeline, X, y, cv=tscv, scoring='accuracy')
+    scores = cross_val_score(pipeline, X, y, cv=tscv, scoring='accuracy',
+                             fit_params={'model__sample_weight': sample_weights})
     cv_results[name] = scores
     delta = scores.mean() - naive_cv.mean()
     fold_str = "  ".join([f"{s:.3f}" for s in scores])
@@ -195,6 +211,7 @@ print()
 split_idx = int(len(df) * 0.8)
 X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
 y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+w_train = sample_weights[:split_idx]
 
 majority_class = int(y_train.mode()[0])
 naive_holdout  = accuracy_score(y_test, [majority_class] * len(y_test))
@@ -203,7 +220,7 @@ print(f"Train: {len(X_train)} rows  |  Holdout test: {len(X_test)} rows")
 print()
 
 for name, pipeline in models.items():
-    pipeline.fit(X_train, y_train)
+    pipeline.fit(X_train, y_train, model__sample_weight=w_train)
     preds = pipeline.predict(X_test)
     acc   = accuracy_score(y_test, preds)
 
@@ -272,7 +289,7 @@ else:
 calibrated_model = CalibratedClassifierCV(
     best_pipeline, method='isotonic', cv=TimeSeriesSplit(n_splits=5)
 )
-calibrated_model.fit(X_train, y_train)
+calibrated_model.fit(X_train, y_train, sample_weight=w_train)
 
 # Report calibrated accuracy on the holdout so we can see if calibration hurt accuracy.
 cal_probs = calibrated_model.predict_proba(X_test)
