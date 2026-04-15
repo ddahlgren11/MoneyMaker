@@ -36,7 +36,8 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           echo "Length: ${#DATABASE_URL}"
-          echo "Prefix: ${DATABASE_URL:0:20}"
+          echo "Prefix: ${DATABASE_URL:0:30}"
+          python3 -c "import os; url=os.environ.get('DATABASE_URL',''); print('repr prefix:', repr(url[:40]))"
 
       - name: Fetch fresh data (tweets + stocks + news)
         env:

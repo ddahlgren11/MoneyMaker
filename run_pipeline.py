@@ -25,13 +25,14 @@ from sqlalchemy.orm import sessionmaker
 load_dotenv()
 
 # ── Validate required env vars before going further ───────────────────────────
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 if not DATABASE_URL:
     print("FATAL: DATABASE_URL is not set.", file=sys.stderr)
     sys.exit(1)
 # Neon/Heroku connection strings often use postgres:// — SQLAlchemy requires postgresql://
-if DATABASE_URL.startswith("postgres://"):
+if DATABASE_URL.startswith("postgres://") and not DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+print(f"DB URL prefix (repr): {DATABASE_URL[:35]!r}", file=sys.stderr)
 
 # ── DB setup ──────────────────────────────────────────────────────────────────
 engine       = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
