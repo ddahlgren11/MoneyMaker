@@ -189,7 +189,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         "bchesky":        "ABNB",
         "dkhos":          "UBER",
         "RobertIger":     "DIS",
-        "zuck":           "META",
+        "Benioff":        "CRM",
         "jensenhuang":    "NVDA",
         "jack":           "SQ",
         "tobi":           "SHOP",

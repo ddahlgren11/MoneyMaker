@@ -139,7 +139,7 @@ TARGETS = {
     "bchesky":        "ABNB",
     "dkhos":          "UBER",
     "RobertIger":     "DIS",
-    "zuck":           "META",
+    "Benioff":        "CRM",
     "jensenhuang":    "NVDA",
     "jack":           "SQ",
     "tobi":           "SHOP",

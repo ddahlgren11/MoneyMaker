@@ -29,6 +29,7 @@ SECTOR_ETF_MAP = {
     "SQ":    "XLK",
     "SHOP":  "XLK",
     "COIN":  "XLK",
+    "CRM":   "XLK",
 }
 
 def get_sector_etf(ticker):
