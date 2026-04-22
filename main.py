@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from sqlalchemy import create_engine, Column, Integer, String, Float
+from sqlalchemy import create_engine, Column, Integer, String, Float, inspect, text as sa_text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
@@ -126,9 +126,50 @@ class MergedRecord(Base):
     # Market context
     vix_at_tweet = Column(Float, nullable=True)       # VIX on tweet day — market fear level
     days_to_earnings = Column(Integer, nullable=True)  # calendar days to nearest earnings date
+    # Tier 1: price/volume context features
+    return_1d = Column(Float, nullable=True)           # stock return over 1 trading day prior
+    return_5d = Column(Float, nullable=True)           # stock return over 5 trading days prior
+    return_20d = Column(Float, nullable=True)          # stock return over 20 trading days prior
+    volume_ratio_20d = Column(Float, nullable=True)    # today's volume / 20-day avg volume
+    dist_from_52w_high = Column(Float, nullable=True)  # (close - 52w_high) / 52w_high
+    dist_from_52w_low = Column(Float, nullable=True)   # (close - 52w_low) / 52w_low
+    spy_return_same_day = Column(Float, nullable=True) # SPY's return on the tweet's target day
+    # Regression targets — next-day returns (continuous, richer than binary direction)
+    next_day_return = Column(Float, nullable=True)       # stock pct return from tweet-day close to next-day close
+    next_day_spy_return = Column(Float, nullable=True)   # SPY return on the day AFTER the tweet
+    abnormal_return_1d = Column(Float, nullable=True)    # next_day_return - next_day_spy_return (alpha)
 
 # Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
+
+
+def _migrate_merged_data_schema():
+    """Adds any missing Tier 1 columns to merged_data without dropping the table."""
+    new_cols = {
+        "return_1d":            "FLOAT",
+        "return_5d":            "FLOAT",
+        "return_20d":           "FLOAT",
+        "volume_ratio_20d":     "FLOAT",
+        "dist_from_52w_high":   "FLOAT",
+        "dist_from_52w_low":    "FLOAT",
+        "spy_return_same_day":  "FLOAT",
+        "next_day_return":      "FLOAT",
+        "next_day_spy_return":  "FLOAT",
+        "abnormal_return_1d":   "FLOAT",
+    }
+    inspector = inspect(engine)
+    if "merged_data" not in inspector.get_table_names():
+        return
+    existing = {col["name"] for col in inspector.get_columns("merged_data")}
+    missing = [(name, typ) for name, typ in new_cols.items() if name not in existing]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for name, typ in missing:
+            conn.execute(sa_text(f'ALTER TABLE merged_data ADD COLUMN {name} {typ}'))
+
+
+_migrate_merged_data_schema()
 
 # --- PYDANTIC SCHEMAS ---
 class TweetSchema(BaseModel):
@@ -233,8 +274,8 @@ async def process_and_save_all(db: Session = Depends(get_db)):
             if tweets_df.empty:
                 continue
 
-            # Extra 30-day lookback so RSI/ATR rolling windows are valid from the first tweet
-            min_date = tweets_df['date'].min() - timedelta(days=30)
+            # 260-day lookback so 252-trading-day (52w) windows are valid from the first tweet
+            min_date = tweets_df['date'].min() - timedelta(days=260)
             max_date = tweets_df['date'].max() + timedelta(days=5)
 
             # 2a. Fetch VIX for this date range (market fear context)
@@ -268,6 +309,39 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                 gain = delta.where(delta > 0, 0.0).rolling(14).mean()
                 loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
                 stocks_df['rsi_14'] = 100 - (100 / (1 + gain / loss))
+
+                # Tier 1: recent returns (use prev-day close so tweet-day isn't leaking)
+                prev_close_series = stocks_df['close'].shift(1)
+                stocks_df['return_1d']  = prev_close_series.pct_change(1)
+                stocks_df['return_5d']  = prev_close_series.pct_change(5)
+                stocks_df['return_20d'] = prev_close_series.pct_change(20)
+
+                # Volume ratio vs 20-day average (uses prior 20 days to avoid leakage)
+                vol_avg_20 = stocks_df['volume'].shift(1).rolling(20).mean()
+                stocks_df['volume_ratio_20d'] = stocks_df['volume'] / vol_avg_20
+
+                # Distance from 52-week high / low (based on prior 252 trading days)
+                prior_high_52w = stocks_df['high'].shift(1).rolling(252, min_periods=60).max()
+                prior_low_52w  = stocks_df['low'].shift(1).rolling(252, min_periods=60).min()
+                stocks_df['dist_from_52w_high'] = (stocks_df['close'] - prior_high_52w) / prior_high_52w
+                stocks_df['dist_from_52w_low']  = (stocks_df['close'] - prior_low_52w) / prior_low_52w
+
+            # 2c-bis. SPY same-day return lookup (market-wide context).
+            # Fetch once per CEO since ranges differ by ticker.
+            spy_return_lookup = {}
+            try:
+                spy_df = yf.download("SPY", start=min_date, end=max_date + timedelta(days=1),
+                                      auto_adjust=True, progress=False)
+                if not spy_df.empty:
+                    if isinstance(spy_df.columns, pd.MultiIndex):
+                        spy_df.columns = spy_df.columns.get_level_values(0)
+                    spy_df = spy_df.sort_index()
+                    spy_ret = spy_df['Close'].pct_change(1)
+                    spy_return_lookup = {d.date(): float(v)
+                                         for d, v in zip(spy_ret.index, spy_ret.values)
+                                         if not pd.isna(v)}
+            except Exception:
+                spy_return_lookup = {}
 
             # 2d. Build news sentiment lookup — one AV call per ticker (sort=EARLIEST),
             # cached to DB so re-runs don't burn the 25 req/day limit.
@@ -329,8 +403,18 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                 stock_volume = 0.0
                 stock_open_close_diff = 0.0
                 next_day_direction = None
+                next_day_return = None
+                next_day_spy_return = None
+                abnormal_return_1d = None
                 rsi_at_tweet = None
                 atr_at_tweet = None
+                return_1d = None
+                return_5d = None
+                return_20d = None
+                volume_ratio_20d = None
+                dist_from_52w_high = None
+                dist_from_52w_low = None
+                matched_stock_date = None
                 if not stocks_df.empty:
                     valid_stocks = stocks_df[stocks_df['date_only'] >= target_date_only]
                     if not valid_stocks.empty:
@@ -338,13 +422,31 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                         stock_volume = float(valid_stocks['volume'].iloc[0])
                         stock_open = float(valid_stocks['open'].iloc[0])
                         stock_open_close_diff = float(stock_open - stock_close)
+                        matched_stock_date = valid_stocks['date_only'].iloc[0]
                         if len(valid_stocks) >= 2:
                             next_close = float(valid_stocks['close'].iloc[1])
+                            next_trading_date = valid_stocks['date_only'].iloc[1]
                             next_day_direction = 1 if next_close > stock_close else 0
+                            next_day_return = (next_close - stock_close) / stock_close if stock_close else None
+                            next_day_spy_return = spy_return_lookup.get(next_trading_date)
+                            if next_day_return is not None and next_day_spy_return is not None:
+                                abnormal_return_1d = next_day_return - next_day_spy_return
                         rsi_val = valid_stocks['rsi_14'].iloc[0]
                         atr_val = valid_stocks['atr_14'].iloc[0]
                         rsi_at_tweet = float(rsi_val) if not pd.isna(rsi_val) else None
                         atr_at_tweet = float(atr_val) if not pd.isna(atr_val) else None
+
+                        def _nn(v):
+                            return float(v) if not pd.isna(v) else None
+
+                        return_1d          = _nn(valid_stocks['return_1d'].iloc[0])
+                        return_5d          = _nn(valid_stocks['return_5d'].iloc[0])
+                        return_20d         = _nn(valid_stocks['return_20d'].iloc[0])
+                        volume_ratio_20d   = _nn(valid_stocks['volume_ratio_20d'].iloc[0])
+                        dist_from_52w_high = _nn(valid_stocks['dist_from_52w_high'].iloc[0])
+                        dist_from_52w_low  = _nn(valid_stocks['dist_from_52w_low'].iloc[0])
+
+                spy_return_same_day = spy_return_lookup.get(matched_stock_date) if matched_stock_date else None
 
                 # News sentiment — look up from the bulk fetch done once per ticker
                 news_sentiment_score = news_lookup.get(target_date_only.isoformat())
@@ -384,6 +486,16 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                     news_sentiment_score=news_sentiment_score,
                     vix_at_tweet=vix_at_tweet,
                     days_to_earnings=days_to_earnings,
+                    return_1d=return_1d,
+                    return_5d=return_5d,
+                    return_20d=return_20d,
+                    volume_ratio_20d=volume_ratio_20d,
+                    dist_from_52w_high=dist_from_52w_high,
+                    dist_from_52w_low=dist_from_52w_low,
+                    spy_return_same_day=spy_return_same_day,
+                    next_day_return=next_day_return,
+                    next_day_spy_return=next_day_spy_return,
+                    abnormal_return_1d=abnormal_return_1d,
                 )
                 db.add(new_record)
                 total_records += 1

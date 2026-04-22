@@ -2,6 +2,8 @@ import os
 import streamlit as st
 import asyncio
 import pandas as pd
+import numpy as np
+import joblib
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import timedelta, datetime
@@ -274,7 +276,7 @@ def weekend_shift(dt):
     return dt
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_home, tab_data, tab_impact, tab_stock, tab_drill, tab_ctx, tab_predict = st.tabs(["Home", "Data", "Tweet Analysis", "Stock Analysis", "Tweet Explorer", "Market Context", "Predict"])
+tab_home, tab_data, tab_impact, tab_stock, tab_drill, tab_ctx, tab_predict, tab_backtest = st.tabs(["Home", "Data", "Tweet Analysis", "Stock Analysis", "Tweet Explorer", "Market Context", "Predict", "Backtest"])
 
 # ── HOME TAB ──────────────────────────────────────────────────────────────────
 with tab_home:
@@ -398,7 +400,43 @@ with tab_data:
                             if filtered.empty:
                                 st.info("No tweets found for this date range.")
                             else:
-                                st.dataframe(filtered[['ceo', 'date', 'text', 'sentiment']], use_container_width=True)
+                                enriched = filtered.copy()
+                            enriched['sentiment_label'] = enriched['sentiment'].apply(get_refined_sentiment)
+                            enriched['tone'] = enriched.apply(
+                                lambda r: get_tone_category(str(r['text']), float(r['sentiment'])), axis=1
+                            )
+                            enriched['tweet_type'] = enriched['text'].apply(get_tweet_type)
+
+                            fa, fb, fc = st.columns(3)
+                            with fa:
+                                sel_labels = st.multiselect(
+                                    "Sentiment", sorted(enriched['sentiment_label'].unique()),
+                                    default=sorted(enriched['sentiment_label'].unique()),
+                                    key="data_filter_sentiment",
+                                )
+                            with fb:
+                                sel_tones = st.multiselect(
+                                    "Tone", sorted(enriched['tone'].unique()),
+                                    default=sorted(enriched['tone'].unique()),
+                                    key="data_filter_tone",
+                                )
+                            with fc:
+                                sel_types = st.multiselect(
+                                    "Tweet Type", sorted(enriched['tweet_type'].unique()),
+                                    default=sorted(enriched['tweet_type'].unique()),
+                                    key="data_filter_type",
+                                )
+
+                            fmask = (
+                                enriched['sentiment_label'].isin(sel_labels) &
+                                enriched['tone'].isin(sel_tones) &
+                                enriched['tweet_type'].isin(sel_types)
+                            )
+                            st.caption(f"{fmask.sum()} of {len(enriched)} tweets shown")
+                            st.dataframe(
+                                enriched[fmask][['date', 'text', 'sentiment', 'sentiment_label', 'tone', 'tweet_type']],
+                                use_container_width=True,
+                            )
                     else:
                         with data_results:
                             st.info("No tweets found.")
@@ -1477,8 +1515,8 @@ with tab_predict:
                             with predict_container:
                                 st.info("No tweets found for this date range.")
                         else:
-                            # Fetch stocks with 30-day lookback so RSI/ATR are valid
-                            min_date = tweets_df["date"].min() - timedelta(days=30)
+                            # 260-day lookback so 52-week rolling windows are valid
+                            min_date = tweets_df["date"].min() - timedelta(days=260)
                             max_date = tweets_df["date"].max() + timedelta(days=5)
                             stocks_df = proc.get_stocks(stock_ticker, start_date=min_date, end_date=max_date)
 
@@ -1502,43 +1540,462 @@ with tab_predict:
                                 loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
                                 stocks_df["rsi_14"] = 100 - (100 / (1 + gain / loss))
 
+                                # Tier 1: returns, volume ratio, 52w extremes
+                                prev_close_series = stocks_df["close"].shift(1)
+                                stocks_df["return_1d"]  = prev_close_series.pct_change(1)
+                                stocks_df["return_5d"]  = prev_close_series.pct_change(5)
+                                stocks_df["return_20d"] = prev_close_series.pct_change(20)
+                                vol_avg_20 = stocks_df["volume"].shift(1).rolling(20).mean()
+                                stocks_df["volume_ratio_20d"] = stocks_df["volume"] / vol_avg_20
+                                prior_high_52w = stocks_df["high"].shift(1).rolling(252, min_periods=60).max()
+                                prior_low_52w  = stocks_df["low"].shift(1).rolling(252, min_periods=60).min()
+                                stocks_df["dist_from_52w_high"] = (stocks_df["close"] - prior_high_52w) / prior_high_52w
+                                stocks_df["dist_from_52w_low"]  = (stocks_df["close"] - prior_low_52w) / prior_low_52w
+
+                            # SPY same-day return lookup
+                            _spy_lookup = {}
+                            try:
+                                import yfinance as _yf
+                                _spy_df = _yf.download("SPY", start=min_date, end=max_date + timedelta(days=1),
+                                                        auto_adjust=True, progress=False)
+                                if not _spy_df.empty:
+                                    if isinstance(_spy_df.columns, pd.MultiIndex):
+                                        _spy_df.columns = _spy_df.columns.get_level_values(0)
+                                    _spy_df = _spy_df.sort_index()
+                                    _spy_ret = _spy_df["Close"].pct_change(1)
+                                    _spy_lookup = {d.date(): float(v)
+                                                   for d, v in zip(_spy_ret.index, _spy_ret.values)
+                                                   if not pd.isna(v)}
+                            except Exception:
+                                _spy_lookup = {}
+
                             # Run predictions
-                            result_df = _predict_tweets(tweets_df, stocks_df)
+                            result_df = _predict_tweets(tweets_df, stocks_df,
+                                                         ticker=stock_ticker,
+                                                         spy_lookup=_spy_lookup)
+
+                            # Join actual next-day outcomes from DB (if available)
+                            _pred_engine = get_db_engine()
+                            if _pred_engine is not None:
+                                try:
+                                    with _pred_engine.connect() as _pc:
+                                        _actual_df = pd.read_sql(
+                                            text(
+                                                "SELECT date, next_day_direction FROM merged_data "
+                                                "WHERE ceo = :ceo AND next_day_direction IS NOT NULL"
+                                            ),
+                                            _pc, params={"ceo": ceo_handle},
+                                        )
+                                    if not _actual_df.empty:
+                                        _actual_df['date_key'] = _actual_df['date'].str[:10]
+                                        result_df['date_key'] = result_df['date'].astype(str).str[:10]
+                                        result_df = result_df.merge(
+                                            _actual_df[['date_key', 'next_day_direction']].drop_duplicates('date_key'),
+                                            on='date_key', how='left',
+                                        )
+                                        result_df['actual_outcome'] = result_df['next_day_direction'].map({1: 'Up', 0: 'Down'})
+                                        result_df['correct'] = result_df.apply(
+                                            lambda r: True if pd.notna(r.get('next_day_direction')) and (
+                                                (r['predicted_direction'] == 'Up' and r['next_day_direction'] == 1) or
+                                                (r['predicted_direction'] == 'Down' and r['next_day_direction'] == 0)
+                                            ) else (False if pd.notna(r.get('next_day_direction')) else None),
+                                            axis=1,
+                                        )
+                                except Exception:
+                                    pass
 
                             with predict_container:
                                 st.subheader(f"Predictions — @{ceo_handle} & {stock_ticker.upper()} ({date_display})")
 
-                                # Summary metrics
                                 up_count = (result_df["predicted_direction"] == "Up").sum()
                                 down_count = (result_df["predicted_direction"] == "Down").sum()
                                 avg_conf = result_df["confidence_pct"].mean()
-                                m1, m2, m3 = st.columns(3)
-                                m1.metric("Predicted Up", up_count)
-                                m2.metric("Predicted Down", down_count)
-                                m3.metric("Avg Confidence", f"{avg_conf:.1f}%")
 
-                                # Results table
-                                display_df = result_df[["date", "text", "sentiment", "likes", "retweet_count", "predicted_direction", "confidence_pct"]].copy()
+                                has_actuals = 'correct' in result_df.columns and result_df['correct'].notna().any()
+                                if has_actuals:
+                                    known = result_df[result_df['correct'].notna()]
+                                    accuracy = known['correct'].mean()
+                                    m1, m2, m3, m4 = st.columns(4)
+                                    m1.metric("Predicted Up", up_count)
+                                    m2.metric("Predicted Down", down_count)
+                                    m3.metric("Avg Confidence", f"{avg_conf:.1f}%")
+                                    m4.metric("Accuracy vs Actual", f"{accuracy:.0%}", f"{len(known)} known outcomes")
+                                else:
+                                    m1, m2, m3 = st.columns(3)
+                                    m1.metric("Predicted Up", up_count)
+                                    m2.metric("Predicted Down", down_count)
+                                    m3.metric("Avg Confidence", f"{avg_conf:.1f}%")
+
+                                # Build display table
+                                base_cols = ["date", "text", "sentiment", "likes", "retweet_count", "predicted_direction", "confidence_pct"]
+                                rename_map = {
+                                    "date": "Date", "text": "Tweet", "sentiment": "Sentiment",
+                                    "likes": "Likes", "retweet_count": "Retweets",
+                                    "predicted_direction": "Prediction", "confidence_pct": "Confidence %",
+                                }
+                                if has_actuals:
+                                    base_cols += ["actual_outcome", "correct"]
+                                    rename_map["actual_outcome"] = "Actual"
+                                    rename_map["correct"] = "Correct?"
+
+                                display_df = result_df[base_cols].copy()
                                 display_df["date"] = display_df["date"].astype(str).str[:19]
                                 display_df["text"] = display_df["text"].str[:120]
-                                display_df = display_df.rename(columns={
-                                    "date": "Date",
-                                    "text": "Tweet",
-                                    "sentiment": "Sentiment",
-                                    "likes": "Likes",
-                                    "retweet_count": "Retweets",
-                                    "predicted_direction": "Prediction",
-                                    "confidence_pct": "Confidence %",
-                                })
+                                display_df = display_df.rename(columns=rename_map)
 
-                                def _color_prediction(val):
-                                    color = "#26a69a" if val == "Up" else "#ef5350"
-                                    return f"color: {color}; font-weight: bold"
+                                def _color_direction(val):
+                                    if val in ("Up", "Down"):
+                                        return f"color: {'#26a69a' if val == 'Up' else '#ef5350'}; font-weight: bold"
+                                    return ""
 
-                                styled = display_df.style.map(_color_prediction, subset=["Prediction"])
+                                def _color_correct(val):
+                                    if val is True:
+                                        return "color: #26a69a; font-weight: bold"
+                                    if val is False:
+                                        return "color: #ef5350; font-weight: bold"
+                                    return "color: #8a9bbf"
+
+                                style_cols = ["Prediction"]
+                                if has_actuals:
+                                    style_cols += ["Actual", "Correct?"]
+
+                                styled = display_df.style.map(_color_direction, subset=["Prediction"])
+                                if has_actuals and "Actual" in display_df.columns:
+                                    styled = styled.map(_color_direction, subset=["Actual"])
+                                    styled = styled.map(_color_correct, subset=["Correct?"])
                                 st.dataframe(styled, use_container_width=True)
 
                     except FileNotFoundError as e:
                         st.error(str(e))
                     except Exception as e:
                         st.error(f"Prediction failed: {str(e)}\n{traceback.format_exc()}")
+
+        # ── What-If Simulator ─────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### What-If Simulator")
+        st.markdown("Adjust tweet characteristics to explore how the model's prediction changes — no real tweet needed.")
+
+        _WI_TONES = [
+            'General Commentary',
+            'Emotional (Joyful/Excited)',
+            'Emotional (Angry/Frustrated)',
+            'Informational (Promotional/Update)',
+            'Informational (Mixed)',
+        ]
+        _WI_TYPES = [
+            'Personal/General Commentary',
+            'Company Milestone',
+            'Discussion Starter',
+            'Acknowledgment',
+            'Poll/Vote',
+        ]
+
+        wi1, wi2, wi3 = st.columns(3)
+        with wi1:
+            wi_sentiment = st.slider("Sentiment Score", -1.0, 1.0, 0.3, 0.01, key="wi_sentiment")
+            wi_rsi = st.slider("RSI at Tweet", 0, 100, 50, key="wi_rsi")
+            wi_vix = st.slider("VIX", 10.0, 80.0, 20.0, 0.5, key="wi_vix")
+        with wi2:
+            wi_tone = st.selectbox("Tone Category", _WI_TONES, key="wi_tone")
+            wi_type = st.selectbox("Tweet Type", _WI_TYPES, key="wi_type")
+            wi_premarket = st.checkbox("Premarket tweet?", key="wi_premarket")
+        with wi3:
+            wi_likes = st.number_input("Likes", 0, 10_000_000, 1000, 100, key="wi_likes")
+            wi_retweets = st.number_input("Retweets", 0, 1_000_000, 200, 10, key="wi_retweets")
+            wi_views = st.number_input("Views", 0, 100_000_000, 50_000, 1000, key="wi_views")
+
+        if st.button("Simulate Prediction", type="primary", key="wi_run"):
+            try:
+                _wi_model = joblib.load(model_path)
+                _wi_refined = get_refined_sentiment(wi_sentiment)
+                _wi_rsi_fill = float(wi_rsi)
+                _wi_row = {
+                    "sentiment_score":      wi_sentiment,
+                    "sentiment_magnitude":  abs(wi_sentiment),
+                    "tweet_length":         100,
+                    "word_count":           15,
+                    "tweet_count":          1,
+                    "log_likes":            float(np.log1p(wi_likes)),
+                    "log_retweets":         float(np.log1p(wi_retweets)),
+                    "log_views":            float(np.log1p(wi_views)),
+                    "log_replies":          float(np.log1p(50)),
+                    "engagement_rate":      (wi_likes + wi_retweets + 50) / max(wi_views, 1),
+                    "tweet_hour":           9 if wi_premarket else 14,
+                    "is_premarket":         int(wi_premarket),
+                    "rsi_at_tweet":         _wi_rsi_fill,
+                    "atr_at_tweet":         None,
+                    "rsi_overbought":       int(_wi_rsi_fill > 70),
+                    "rsi_oversold":         int(_wi_rsi_fill < 30),
+                    "vix_at_tweet":         float(wi_vix),
+                    "days_to_earnings":     None,
+                    "prev_day_direction":   None,
+                    "news_sentiment_score": None,
+                    "finbert_score":        None,
+                    "finbert_positive":     None,
+                    "finbert_negative":     None,
+                    "finbert_neutral":      None,
+                    "return_1d":            None,
+                    "return_5d":            None,
+                    "return_20d":           None,
+                    "volume_ratio_20d":     None,
+                    "dist_from_52w_high":   None,
+                    "dist_from_52w_low":    None,
+                    "spy_return_same_day":  None,
+                    "refined_sentiment":    _wi_refined,
+                    "tone_category":        wi_tone,
+                    "tweet_type":           wi_type,
+                }
+                _wi_feat = pd.DataFrame([_wi_row])
+                _wi_pred = _wi_model.predict(_wi_feat)[0]
+                _wi_prob = _wi_model.predict_proba(_wi_feat)[0]
+                _wi_direction = "Up" if _wi_pred == 1 else "Down"
+                _wi_confidence = max(_wi_prob) * 100
+                _wi_color = "#26a69a" if _wi_direction == "Up" else "#ef5350"
+
+                st.markdown(f"""
+                <div style="background:#1a2235;border:2px solid {_wi_color};border-radius:12px;
+                            padding:1.5rem;text-align:center;margin-top:1rem;max-width:400px;">
+                    <div style="font-size:0.8rem;color:#8a9bbf;text-transform:uppercase;
+                                letter-spacing:0.1em;margin-bottom:0.5rem;">Predicted Next-Day Direction</div>
+                    <div style="font-size:3rem;font-weight:900;color:{_wi_color};
+                                line-height:1;">{_wi_direction}</div>
+                    <div style="font-size:1rem;color:#c0cfe8;margin-top:0.5rem;">
+                        Confidence: <strong>{_wi_confidence:.1f}%</strong>
+                    </div>
+                    <div style="font-size:0.8rem;color:#8a9bbf;margin-top:0.25rem;">
+                        Sentiment label: {_wi_refined}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            except Exception as _wi_e:
+                st.error(f"Simulation failed: {_wi_e}")
+
+# ── BACKTEST TAB ──────────────────────────────────────────────────────────────
+with tab_backtest:
+    st.markdown("Runs the trained model against every stored record in the database that has a known next-day outcome, then reports how accurate it was.")
+
+    _bt_engine = get_db_engine()
+    if _bt_engine is None:
+        st.warning("No database connection. Run the FastAPI backend and populate the database first.")
+    else:
+        import os as _bos
+        _bt_model_path = _bos.path.join("model", "trained_model.pkl")
+        if not _bos.path.exists(_bt_model_path):
+            st.warning("No trained model found. Run `python3 model/baseline.py` to train and save it.")
+        else:
+            # ── Filters ───────────────────────────────────────────────────────
+            try:
+                with _bt_engine.connect() as _bc:
+                    _bt_ceo_list = pd.read_sql(
+                        text("SELECT DISTINCT ceo FROM merged_data ORDER BY ceo"), _bc
+                    )['ceo'].tolist()
+            except Exception:
+                _bt_ceo_list = []
+
+            bf1, bf2, bf3 = st.columns(3)
+            with bf1:
+                bt_ceos = st.multiselect("CEO (blank = all)", _bt_ceo_list, key="bt_ceos")
+            with bf2:
+                bt_start = st.date_input(
+                    "Start Date",
+                    value=datetime.now(pytz.utc).date() - timedelta(days=365),
+                    key="bt_start",
+                )
+            with bf3:
+                bt_end = st.date_input(
+                    "End Date",
+                    value=datetime.now(pytz.utc).date(),
+                    key="bt_end",
+                )
+
+            run_backtest = st.button("Run Backtest", type="primary")
+            bt_container = st.container()
+
+            if run_backtest:
+                with st.spinner("Loading data and running predictions..."):
+                    try:
+                        ceo_clause = "AND ceo = ANY(:ceos)" if bt_ceos else ""
+                        bt_query = text(f"""
+                            SELECT date, ceo, stock_ticker, tweet_text, sentiment_score,
+                                   refined_sentiment, tone_category, tweet_type,
+                                   likes, retweet_count, view_count, reply_count,
+                                   tweet_hour, is_premarket, rsi_at_tweet, atr_at_tweet,
+                                   vix_at_tweet, days_to_earnings, news_sentiment_score,
+                                   return_1d, return_5d, return_20d,
+                                   volume_ratio_20d,
+                                   dist_from_52w_high, dist_from_52w_low,
+                                   spy_return_same_day,
+                                   next_day_direction
+                            FROM merged_data
+                            WHERE next_day_direction IS NOT NULL
+                              AND date >= :start_date
+                              AND date < :end_date
+                              {ceo_clause}
+                            ORDER BY date ASC
+                        """)
+                        bt_params = {
+                            "start_date": bt_start.isoformat(),
+                            "end_date": (bt_end + timedelta(days=1)).isoformat(),
+                        }
+                        if bt_ceos:
+                            bt_params["ceos"] = bt_ceos
+
+                        with _bt_engine.connect() as _bc:
+                            bt_df = pd.read_sql(bt_query, _bc, params=bt_params)
+
+                        if bt_df.empty:
+                            with bt_container:
+                                st.info("No records with known next-day outcomes found. Run `/process/all` to populate the database.")
+                        else:
+                            _bt_model = joblib.load(_bt_model_path)
+
+                            def _bt_build_feature(row):
+                                sentiment = float(row.get('sentiment_score') or 0)
+                                text_val = str(row.get('tweet_text') or '')
+                                likes_v    = int(row.get('likes') or 0)
+                                rt_v       = int(row.get('retweet_count') or 0)
+                                views_v    = int(row.get('view_count') or 0)
+                                replies_v  = int(row.get('reply_count') or 0)
+                                rsi_v      = row.get('rsi_at_tweet')
+                                rsi_fill   = float(rsi_v) if rsi_v is not None and not pd.isna(rsi_v) else 50.0
+                                return {
+                                    'sentiment_score':      sentiment,
+                                    'sentiment_magnitude':  abs(sentiment),
+                                    'tweet_length':         len(text_val),
+                                    'word_count':           len(text_val.split()),
+                                    'tweet_count':          1,
+                                    'log_likes':            np.log1p(likes_v),
+                                    'log_retweets':         np.log1p(rt_v),
+                                    'log_views':            np.log1p(views_v),
+                                    'log_replies':          np.log1p(replies_v),
+                                    'engagement_rate':      (likes_v + rt_v + replies_v) / max(views_v, 1),
+                                    'tweet_hour':           int(row.get('tweet_hour') or 0),
+                                    'is_premarket':         int(row.get('is_premarket') or 0),
+                                    'rsi_at_tweet':         rsi_v,
+                                    'atr_at_tweet':         row.get('atr_at_tweet'),
+                                    'rsi_overbought':       int(rsi_fill > 70),
+                                    'rsi_oversold':         int(rsi_fill < 30),
+                                    'vix_at_tweet':         row.get('vix_at_tweet'),
+                                    'days_to_earnings':     row.get('days_to_earnings'),
+                                    'prev_day_direction':   None,
+                                    'news_sentiment_score': row.get('news_sentiment_score'),
+                                    'finbert_score':        None,
+                                    'finbert_positive':     None,
+                                    'finbert_negative':     None,
+                                    'finbert_neutral':      None,
+                                    'return_1d':            row.get('return_1d'),
+                                    'return_5d':            row.get('return_5d'),
+                                    'return_20d':           row.get('return_20d'),
+                                    'volume_ratio_20d':     row.get('volume_ratio_20d'),
+                                    'dist_from_52w_high':   row.get('dist_from_52w_high'),
+                                    'dist_from_52w_low':    row.get('dist_from_52w_low'),
+                                    'spy_return_same_day':  row.get('spy_return_same_day'),
+                                    'refined_sentiment':    row.get('refined_sentiment') or get_refined_sentiment(sentiment),
+                                    'tone_category':        row.get('tone_category') or get_tone_category(text_val, sentiment),
+                                    'tweet_type':           row.get('tweet_type') or get_tweet_type(text_val),
+                                }
+
+                            feat_rows = [_bt_build_feature(row) for _, row in bt_df.iterrows()]
+                            feat_df = pd.DataFrame(feat_rows)
+
+                            bt_preds = _bt_model.predict(feat_df)
+                            bt_probs = _bt_model.predict_proba(feat_df)
+
+                            bt_df = bt_df.copy()
+                            bt_df['predicted_direction'] = ['Up' if p == 1 else 'Down' for p in bt_preds]
+                            bt_df['actual_direction']    = bt_df['next_day_direction'].map({1: 'Up', 0: 'Down'})
+                            bt_df['confidence_pct']      = [round(max(p) * 100, 1) for p in bt_probs]
+                            bt_df['correct']             = (bt_preds == bt_df['next_day_direction'].values)
+
+                            from sklearn.metrics import (
+                                accuracy_score, precision_score,
+                                recall_score, f1_score,
+                                confusion_matrix as sk_confusion_matrix,
+                            )
+
+                            y_true = bt_df['next_day_direction'].values
+                            y_pred = bt_preds
+                            acc  = accuracy_score(y_true, y_pred)
+                            prec = precision_score(y_true, y_pred, zero_division=0)
+                            rec  = recall_score(y_true, y_pred, zero_division=0)
+                            f1   = f1_score(y_true, y_pred, zero_division=0)
+
+                            with bt_container:
+                                st.subheader(f"Backtest Results — {len(bt_df):,} tweets")
+
+                                bm1, bm2, bm3, bm4, bm5 = st.columns(5)
+                                bm1.metric("Accuracy", f"{acc:.1%}")
+                                bm2.metric("Precision (Up)", f"{prec:.1%}")
+                                bm3.metric("Recall (Up)", f"{rec:.1%}")
+                                bm4.metric("F1 Score", f"{f1:.1%}")
+                                bm5.metric("Correct / Total", f"{bt_df['correct'].sum()} / {len(bt_df)}")
+
+                                st.markdown("---")
+
+                                # Confusion matrix
+                                st.subheader("Confusion Matrix")
+                                cm = sk_confusion_matrix(y_true, y_pred)
+                                cm_df = pd.DataFrame(
+                                    cm,
+                                    index=['Actual Down', 'Actual Up'],
+                                    columns=['Predicted Down', 'Predicted Up'],
+                                )
+                                st.dataframe(cm_df, use_container_width=False)
+                                st.caption(
+                                    f"Diagonal = correct predictions. "
+                                    f"Top-right = predicted Up but actually went Down. "
+                                    f"Bottom-left = predicted Down but actually went Up."
+                                )
+
+                                st.markdown("---")
+
+                                # Per-CEO breakdown
+                                st.subheader("Performance by CEO")
+
+                                def _ceo_stats(g):
+                                    g_true = g['next_day_direction'].values
+                                    g_pred = (g['predicted_direction'] == 'Up').astype(int).values
+                                    return pd.Series({
+                                        'tweets':    len(g),
+                                        'accuracy':  round(accuracy_score(g_true, g_pred), 3),
+                                        'up_calls':  (g['predicted_direction'] == 'Up').sum(),
+                                        'down_calls': (g['predicted_direction'] == 'Down').sum(),
+                                        'pct_up_actual': round((g['next_day_direction'] == 1).mean(), 3),
+                                    })
+
+                                ceo_stats_df = bt_df.groupby('ceo').apply(_ceo_stats).reset_index()
+                                st.dataframe(ceo_stats_df, use_container_width=True)
+
+                                st.markdown("---")
+
+                                # Full results table
+                                st.subheader("All Predictions vs Actual")
+                                show_bt = bt_df[[
+                                    'date', 'ceo', 'tweet_text',
+                                    'sentiment_score', 'predicted_direction',
+                                    'actual_direction', 'confidence_pct', 'correct',
+                                ]].copy()
+                                show_bt['tweet_text'] = show_bt['tweet_text'].str[:100]
+                                show_bt['date'] = show_bt['date'].astype(str).str[:10]
+
+                                def _bt_color_dir(val):
+                                    if val in ('Up', 'Down'):
+                                        return f"color: {'#26a69a' if val == 'Up' else '#ef5350'}; font-weight: bold"
+                                    return ""
+
+                                def _bt_color_correct(val):
+                                    if val is True:
+                                        return "color: #26a69a; font-weight: bold"
+                                    if val is False:
+                                        return "color: #ef5350; font-weight: bold"
+                                    return ""
+
+                                styled_bt = (
+                                    show_bt.style
+                                    .map(_bt_color_dir, subset=['predicted_direction', 'actual_direction'])
+                                    .map(_bt_color_correct, subset=['correct'])
+                                )
+                                st.dataframe(styled_bt, use_container_width=True)
+
+                    except Exception as _bt_e:
+                        st.error(f"Backtest failed: {str(_bt_e)}\n{traceback.format_exc()}")
