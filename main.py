@@ -194,6 +194,13 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         "jack":           "SQ",
         "tobi":           "SHOP",
         "brian_armstrong": "COIN",
+        # Extended CEO set
+        "ericyuan":       "ZM",    # Eric Yuan, Zoom CEO
+        "CathieDWood":    "ARKK",  # Cathie Wood, ARK Invest
+        "AlexKarp":       "PLTR",  # Alex Karp, Palantir CEO
+        "mtbarra":        "GM",    # Mary Barra, GM CEO
+        "JimFarley98":    "F",     # Jim Farley, Ford CEO
+        "AnthonyNoto":    "SOFI",  # Anthony Noto, SoFi CEO
     }
 
     # Company names for news queries
@@ -208,6 +215,17 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         "ABNB": "Airbnb",
         "UBER": "Uber",
         "DIS": "Disney",
+        "CRM": "Salesforce",
+        "NVDA": "NVIDIA",
+        "SQ": "Block",
+        "SHOP": "Shopify",
+        "COIN": "Coinbase",
+        "ZM": "Zoom",
+        "ARKK": "ARK Innovation ETF",
+        "PLTR": "Palantir",
+        "GM": "General Motors",
+        "F": "Ford Motor",
+        "SOFI": "SoFi Technologies",
     }
 
     total_records = 0

@@ -30,6 +30,14 @@ SECTOR_ETF_MAP = {
     "SHOP":  "XLK",
     "COIN":  "XLK",
     "CRM":   "XLK",
+    "ZM":    "XLK",
+    "PLTR":  "XLK",
+    "GM":    "XLY",
+    "F":     "XLY",
+    "ARKK":  "XLK",
+    "SOFI":  "XLK",
+    "NFLX":  "XLC",
+    "INTC":  "XLK",
 }
 
 def get_sector_etf(ticker):

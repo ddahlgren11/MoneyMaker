@@ -42,7 +42,7 @@ class DataProcessor:
         except (ValueError, TypeError):
             return 0
 
-    async def get_tweets(self, username, pages=10):
+    async def get_tweets(self, username, pages=20):
         all_tweets = []
         user_tweets = await self.twitter_client.get_tweets(username, pages=pages)
         for tweet in user_tweets:
