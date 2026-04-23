@@ -123,12 +123,23 @@ class MergedRecord(Base):
     atr_at_tweet = Column(Float, nullable=True)
     # News sentiment on tweet day
     news_sentiment_score = Column(Float, nullable=True)
+    # FinBERT financial sentiment (independent of VADER sentiment_score)
+    finbert_score = Column(Float, nullable=True)
     # Market context
     vix_at_tweet = Column(Float, nullable=True)       # VIX on tweet day — market fear level
     days_to_earnings = Column(Integer, nullable=True)  # calendar days to nearest earnings date
 
 # Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
+
+# Add any new columns that don't exist yet (safe to run on every startup)
+with engine.connect() as _conn:
+    for _col, _type in [("finbert_score", "FLOAT")]:
+        try:
+            _conn.execute(text(f"ALTER TABLE merged_data ADD COLUMN {_col} {_type}"))
+            _conn.commit()
+        except Exception:
+            pass  # column already exists
 
 # --- PYDANTIC SCHEMAS ---
 class TweetSchema(BaseModel):
@@ -402,6 +413,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                     news_sentiment_score=news_sentiment_score,
                     vix_at_tweet=vix_at_tweet,
                     days_to_earnings=days_to_earnings,
+                    finbert_score=float(row.get('finbert_score')) if row.get('finbert_score') is not None else None,
                 )
                 db.add(new_record)
                 total_records += 1

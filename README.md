@@ -44,7 +44,6 @@ Interactive API docs are available at http://localhost:8000/docs
 
 **3. Start the Streamlit dashboard** (runs at http://localhost:8501)
 ```bash
-streamlit run app.py
 ```
 
 Run both in separate terminal tabs.

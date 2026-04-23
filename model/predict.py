@@ -14,7 +14,7 @@ import pandas as pd
 import joblib
 import yfinance as yf
 from datetime import timedelta, datetime
-from classifier import get_refined_sentiment, get_tone_category, get_tweet_type
+from classifier import get_refined_sentiment, get_tone_category, get_tweet_type, get_finbert_score
 from context import get_earnings_dates
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "trained_model.pkl")
@@ -98,6 +98,9 @@ def _build_feature_row(tweet_row, stocks_df, ticker=None):
 
     sentiment = float(tweet_row.get("sentiment", 0))
     text = str(tweet_row.get("text", ""))
+    finbert = tweet_row.get("finbert_score")
+    if finbert is None:
+        finbert = get_finbert_score(text)
 
     likes        = int(tweet_row.get("likes", 0))
     retweet_count = int(tweet_row.get("retweet_count", 0))
@@ -110,6 +113,7 @@ def _build_feature_row(tweet_row, stocks_df, ticker=None):
     return {
         "sentiment_score":      sentiment,
         "sentiment_magnitude":  abs(sentiment),
+        "finbert_score":        float(finbert) if finbert is not None else None,
         "tweet_length":         len(text),
         "word_count":           len(text.split()),
         "log_likes":            float(np.log1p(likes)),

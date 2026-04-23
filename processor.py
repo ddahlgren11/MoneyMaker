@@ -18,7 +18,7 @@ def patched_get_indices(self, home_page_html=None):
 
 tweety.transaction.TransactionGenerator.get_indices = patched_get_indices
 
-from classifier import get_sentiment_score
+from classifier import get_sentiment_score, get_finbert_scores_batch
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -68,7 +68,10 @@ class DataProcessor:
                 'tweet_hour': tweet_hour,
                 'is_premarket': is_premarket,
             })
-        return pd.DataFrame(all_tweets)
+        df = pd.DataFrame(all_tweets)
+        if not df.empty:
+            df['finbert_score'] = get_finbert_scores_batch(df['text'].tolist())
+        return df
 
     def get_market_context(self, ticker, start_date, end_date):
         """Fetch SPY and sector ETF bars for the same date range."""

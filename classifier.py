@@ -5,6 +5,47 @@ _analyzer = SentimentIntensityAnalyzer()
 def get_sentiment_score(text):
     return _analyzer.polarity_scores(text)['compound']
 
+# ── FinBERT ───────────────────────────────────────────────────────────────────
+# Lazy-loaded on first use so startup stays fast.
+# Score is positive_prob - negative_prob → [-1, 1], same sign convention as VADER.
+
+_finbert_pipeline = None
+
+def _get_finbert_pipeline():
+    global _finbert_pipeline
+    if _finbert_pipeline is None:
+        from transformers import pipeline as hf_pipeline
+        _finbert_pipeline = hf_pipeline(
+            'text-classification',
+            model='ProsusAI/finbert',
+            top_k=None,
+            truncation=True,
+            max_length=512,
+        )
+    return _finbert_pipeline
+
+def get_finbert_score(text):
+    """Single-text FinBERT score in [-1, 1]. Returns None on failure."""
+    try:
+        result = _get_finbert_pipeline()(str(text)[:512])[0]
+        s = {r['label']: r['score'] for r in result}
+        return round(s.get('positive', 0) - s.get('negative', 0), 4)
+    except Exception:
+        return None
+
+def get_finbert_scores_batch(texts):
+    """Batch FinBERT scoring — much faster than calling one-by-one during ingestion."""
+    try:
+        pipe = _get_finbert_pipeline()
+        results = pipe([str(t)[:512] for t in texts])
+        out = []
+        for result in results:
+            s = {r['label']: r['score'] for r in result}
+            out.append(round(s.get('positive', 0) - s.get('negative', 0), 4))
+        return out
+    except Exception:
+        return [None] * len(texts)
+
 def get_refined_sentiment(score):
     if score <= -0.6: return 'Very Negative'
     elif score <= -0.2: return 'Negative'

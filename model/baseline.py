@@ -45,7 +45,7 @@ load_dotenv()
 engine = create_engine(os.getenv("DATABASE_URL"), pool_pre_ping=True)
 df = pd.read_sql(
     text("""
-        SELECT date, tweet_text, sentiment_score,
+        SELECT date, tweet_text, sentiment_score, finbert_score,
                likes, retweet_count, view_count, reply_count,
                tweet_hour, is_premarket, refined_sentiment, tone_category, tweet_type,
                rsi_at_tweet, atr_at_tweet, vix_at_tweet, days_to_earnings,
@@ -94,6 +94,7 @@ df['rsi_oversold']   = (df['rsi_at_tweet'].fillna(50) < 30).astype(int)
 
 numeric_features = [
     'sentiment_score', 'sentiment_magnitude',
+    'finbert_score',                           # financial-domain sentiment (FinBERT)
     'tweet_length', 'word_count',             # tweet substance
     'log_likes', 'log_retweets', 'log_views', 'log_replies',
     'engagement_rate',
