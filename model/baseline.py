@@ -36,6 +36,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.utils.class_weight import compute_sample_weight
 
 load_dotenv()
 
@@ -210,7 +211,13 @@ print()
 split_idx = int(len(df) * 0.8)
 X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
 y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-w_train = sample_weights[:split_idx]
+
+# Combine temporal decay with class-balance weights so GradientBoosting
+# (which doesn't support class_weight=) gets the same Up/Down balance that
+# LR and RF get via class_weight='balanced'.
+class_balance_weights = compute_sample_weight('balanced', y_train)
+w_train = (sample_weights[:split_idx] * class_balance_weights)
+w_train = w_train / w_train.mean()  # keep mean=1 so learning rates stay comparable
 
 majority_class = int(y_train.mode()[0])
 naive_holdout  = accuracy_score(y_test, [majority_class] * len(y_test))

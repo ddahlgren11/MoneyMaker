@@ -1255,71 +1255,147 @@ with tab_drill:
                             if display_df.empty:
                                 st.info("No stock data in this window.")
                             else:
-                                fig = make_subplots(
-                                    rows=2, cols=1,
-                                    shared_xaxes=True,
-                                    row_heights=[0.72, 0.28],
-                                    vertical_spacing=0.05,
-                                    subplot_titles=[f"{drill_ticker.upper()} Price", "Volume"],
-                                )
+                                before    = display_df[display_df['timestamp'] < tweet_dt]
+                                after     = display_df[display_df['timestamp'] > tweet_dt]
 
-                                ts = display_df['timestamp']
+                                pre_close  = float(before['close'].iloc[-1]) if not before.empty else None
+                                next_close = float(after['close'].iloc[0]) if not after.empty else None
+                                day5_close = float(after['close'].iloc[min(4, len(after) - 1)]) if not after.empty else None
+                                days_shown = min(5, len(after)) if not after.empty else 0
+                                net_up     = (next_close >= pre_close) if (next_close is not None and pre_close is not None) else None
+                                a_color    = '#26a69a' if net_up else '#ef5350'
 
-                                fig.add_trace(go.Candlestick(
-                                    x=ts,
-                                    open=display_df['open'], high=display_df['high'],
-                                    low=display_df['low'], close=display_df['close'],
-                                    name="Price",
-                                    increasing_line_color='#26a69a',
-                                    decreasing_line_color='#ef5350',
-                                ), row=1, col=1)
+                                # Plain-language headline
+                                if net_up is not None and pre_close and next_close:
+                                    pct1   = (next_close - pre_close) / pre_close * 100
+                                    word   = "rose" if net_up else "fell"
+                                    icon   = "📈" if net_up else "📉"
+                                    hcolor = '#26a69a' if net_up else '#ef5350'
+                                    st.markdown(f"""
+                                    <div style="background:#1a2235;border-left:4px solid {hcolor};border-radius:8px;
+                                                padding:0.65rem 1rem;margin-bottom:0.75rem;">
+                                        <span style="font-size:1.2rem;">{icon}</span>
+                                        <span style="color:{hcolor};font-weight:700;font-size:1.05rem;">
+                                            &nbsp;The stock {word} {abs(pct1):.1f}%
+                                        </span>
+                                        <span style="color:#8a9bbf;font-size:0.9rem;">
+                                            &nbsp;the next trading day after this tweet
+                                        </span>
+                                    </div>
+                                    """, unsafe_allow_html=True)
 
-                                vol_colors = ['#26a69a' if c >= o else '#ef5350'
-                                              for c, o in zip(display_df['close'], display_df['open'])]
-                                fig.add_trace(go.Bar(
-                                    x=ts, y=display_df['volume'],
-                                    name="Volume", marker_color=vol_colors, showlegend=False
-                                ), row=2, col=1)
+                                fig = go.Figure()
 
-                                # Tweet marker line
-                                fig.add_vline(
-                                    x=tweet_dt,
-                                    line=dict(color='yellow', width=2, dash='dash'),
-                                )
+                                # Subtle background shading for the "after tweet" window
+                                if not after.empty and net_up is not None:
+                                    fig.add_vrect(
+                                        x0=tweet_dt,
+                                        x1=display_df['timestamp'].max(),
+                                        fillcolor='rgba(38,166,154,0.07)' if net_up else 'rgba(239,83,80,0.07)',
+                                        opacity=1, layer='below', line_width=0,
+                                    )
+
+                                # Muted gray line — price BEFORE the tweet
+                                if not before.empty:
+                                    fig.add_trace(go.Scatter(
+                                        x=before['timestamp'], y=before['close'],
+                                        mode='lines',
+                                        line=dict(color='#4a5a7a', width=2),
+                                        showlegend=False,
+                                    ))
+
+                                # Colored line — price AFTER the tweet (bridged from last before-point)
+                                if not after.empty:
+                                    conn_x = ([before['timestamp'].iloc[-1]] if not before.empty else []) + list(after['timestamp'])
+                                    conn_y = ([float(before['close'].iloc[-1])] if not before.empty else []) + list(after['close'])
+                                    fig.add_trace(go.Scatter(
+                                        x=conn_x, y=conn_y,
+                                        mode='lines',
+                                        line=dict(color=a_color, width=2.5),
+                                        showlegend=False,
+                                    ))
+
+                                # Dotted reference line at the pre-tweet closing price
+                                if pre_close:
+                                    fig.add_hline(
+                                        y=pre_close,
+                                        line=dict(color='rgba(200,200,200,0.2)', width=1, dash='dot'),
+                                    )
+
+                                # Tweet vertical marker
+                                fig.add_vline(x=tweet_dt, line=dict(color='#ff8c5c', width=2))
                                 fig.add_annotation(
-                                    x=tweet_dt, y=1.05, yref='paper',
-                                    text="📝 Tweet posted",
+                                    x=tweet_dt, y=0.97, yref='paper',
+                                    text="📝 Tweet",
                                     showarrow=False,
-                                    font=dict(color='yellow', size=12),
+                                    font=dict(color='#ff8c5c', size=11),
                                     bgcolor='rgba(0,0,0,0.6)',
+                                    bordercolor='#ff8c5c',
+                                    borderwidth=1,
+                                    xanchor='left', xshift=6,
                                 )
+
+                                # Annotated dot — last close before tweet
+                                if pre_close and not before.empty:
+                                    fig.add_trace(go.Scatter(
+                                        x=[before['timestamp'].iloc[-1]], y=[pre_close],
+                                        mode='markers+text',
+                                        marker=dict(size=9, color='#8a9bbf'),
+                                        text=[f'Before<br>${pre_close:.2f}'],
+                                        textposition='top center',
+                                        textfont=dict(color='#8a9bbf', size=10),
+                                        showlegend=False,
+                                    ))
+
+                                # Annotated dot — next trading day
+                                if next_close and not after.empty and pre_close:
+                                    pct1 = (next_close - pre_close) / pre_close * 100
+                                    fig.add_trace(go.Scatter(
+                                        x=[after['timestamp'].iloc[0]], y=[next_close],
+                                        mode='markers+text',
+                                        marker=dict(size=9, color=a_color),
+                                        text=[f'Day 1<br><b>{pct1:+.1f}%</b>'],
+                                        textposition='top center',
+                                        textfont=dict(color=a_color, size=10),
+                                        showlegend=False,
+                                    ))
+
+                                # Annotated dot — 5 days later
+                                if day5_close and not after.empty and pre_close and days_shown >= 2:
+                                    pct5 = (day5_close - pre_close) / pre_close * 100
+                                    c5   = '#26a69a' if pct5 >= 0 else '#ef5350'
+                                    fig.add_trace(go.Scatter(
+                                        x=[after['timestamp'].iloc[days_shown - 1]], y=[day5_close],
+                                        mode='markers+text',
+                                        marker=dict(size=9, color=c5),
+                                        text=[f'{days_shown}d later<br><b>{pct5:+.1f}%</b>'],
+                                        textposition='bottom center' if pct5 < (pct1 if next_close else 0) else 'top center',
+                                        textfont=dict(color=c5, size=10),
+                                        showlegend=False,
+                                    ))
 
                                 fig.update_layout(
-                                    height=520,
-                                    xaxis_rangeslider_visible=False,
+                                    height=380,
                                     template='plotly_dark',
-                                    margin=dict(l=0, r=0, t=50, b=0),
+                                    xaxis_rangeslider_visible=False,
+                                    margin=dict(l=0, r=20, t=20, b=0),
+                                    paper_bgcolor='#1a1f2e',
+                                    plot_bgcolor='#12161f',
+                                    yaxis=dict(gridcolor='#2a3a55', tickprefix='$', tickformat='.2f'),
+                                    xaxis=dict(gridcolor='#2a3a55'),
                                     showlegend=False,
                                 )
 
                                 st.plotly_chart(fig, use_container_width=True)
 
-                                # Before / after stats
-                                before = display_df[display_df['timestamp'] < tweet_dt]
-                                after = display_df[display_df['timestamp'] > tweet_dt]
-
-                                if not before.empty and not after.empty:
-                                    pre_close = float(before['close'].iloc[-1])
-                                    next_close = float(after['close'].iloc[0])
-                                    day5_close = float(after['close'].iloc[min(4, len(after) - 1)])
-                                    days_shown = min(5, len(after))
-
+                                # Compact metric summary
+                                if pre_close and next_close and day5_close:
+                                    pct1 = (next_close - pre_close) / pre_close * 100
+                                    pct5 = (day5_close - pre_close) / pre_close * 100
                                     s1, s2, s3 = st.columns(3)
-                                    s1.metric("Close before tweet", f"${pre_close:.2f}")
-                                    s2.metric("Next trading day", f"${next_close:.2f}",
-                                              f"{((next_close - pre_close) / pre_close * 100):+.2f}%")
-                                    s3.metric(f"{days_shown} trading days later", f"${day5_close:.2f}",
-                                              f"{((day5_close - pre_close) / pre_close * 100):+.2f}%")
+                                    s1.metric("Before tweet", f"${pre_close:.2f}")
+                                    s2.metric("Next trading day", f"${next_close:.2f}", f"{pct1:+.2f}%")
+                                    s3.metric(f"{days_shown} days later", f"${day5_close:.2f}", f"{pct5:+.2f}%")
 
                     except Exception as e:
                         st.error(f"Failed to load stock data: {str(e)}\n{traceback.format_exc()}")
