@@ -335,7 +335,7 @@ with tab_home:
         st.markdown("---")
         features = [
             ("Data", "Pull raw tweets, stock prices, and merged data for any CEO and ticker."),
-            ("ATR Analysis", "See whether high-sentiment tweet days coincide with unusual stock volatility."),
+            ("Price Swing Analysis", "See whether high-sentiment tweet days coincide with unusual stock volatility."),
             ("Tweet Impact", "Measure same-day stock reaction on days a CEO posted a high-sentiment tweet."),
             ("Post-Tweet Trend", "Track how a stock drifts over N trading days after a tweet on a radar chart."),
             ("Stock Analysis", "Full candlestick chart with RSI, MACD, Bollinger Bands, and moving averages."),
@@ -546,18 +546,18 @@ with tab_data:
                 except Exception as e:
                     st.error(f"Failed to fetch merged data: {str(e)}")
 
-# ── STOCK ANALYSIS TAB — ATR section ─────────────────────────────────────────
+# ── STOCK ANALYSIS TAB — Price Swing section ─────────────────────────────────────────
 with tab_stock:
-    st.markdown("### ATR Analysis")
-    st.markdown("Identifies periods where high-sentiment tweets coincide with unusual stock volatility relative to the 14-day ATR baseline.")
-    run_atr = st.button("Run ATR Analysis", type="primary")
+    st.markdown("### Price Swing Analysis")
+    st.markdown("Identifies periods where high-sentiment tweets coincide with unusual stock volatility relative to the normal 14-day price swing.")
+    run_atr = st.button("Run Price Swing Analysis", type="primary")
     atr_results_container = st.container()
 
     if run_atr:
         if not ceo_handle or not stock_ticker:
             st.error("Please enter a CEO Twitter Handle and a Stock Ticker.")
         else:
-            with st.spinner("Running ATR Analysis..."):
+            with st.spinner("Running Price Swing Analysis..."):
                 try:
                     tweets_df = run_async(proc.get_tweets(ceo_handle))
                     if not tweets_df.empty and 'date' in tweets_df.columns:
@@ -638,33 +638,33 @@ with tab_stock:
 
                                 results_df = pd.DataFrame(atr_results)
                                 with atr_results_container:
-                                    st.subheader(f"ATR Analysis (@{ceo_handle} & {stock_ticker.upper()}) ({date_display})")
+                                    st.subheader(f"Price Swing Analysis (@{ceo_handle} & {stock_ticker.upper()}) ({date_display})")
                                     if results_df.empty:
                                         st.info("No valid market data overlapping with high-sentiment tweets.")
                                     else:
                                         st.dataframe(results_df, use_container_width=True)
 
                                         viz_df = results_df[['date', 'next_day_range', 'atr_14']].set_index('date')
-                                        st.subheader("Next-Day True Range vs ATR (14-day)")
+                                        st.subheader("Next-Day True Range vs Normal Price Swing (14-day)")
                                         st.bar_chart(viz_df)
 
                                         ratio_df = results_df[['date', 'atr_ratio']].set_index('date')
-                                        st.subheader("ATR Ratio — 1.0 = normal, >1.0 = unusual")
+                                        st.subheader("Swing Ratio — 1.0 = normal, >1.0 = unusual")
                                         st.bar_chart(ratio_df)
 
                                         total = len(results_df)
                                         exceeded = len(results_df[results_df['vs_atr'] == 'Above'])
                                         up_moves = len(results_df[results_df['close_to_close'] > 0])
                                         avg_ratio = results_df['atr_ratio'].mean()
-                                        st.write(f"**{exceeded}/{total}** tweet days had next-day range above ATR. "
-                                                 f"**{up_moves}/{total}** closed up. Avg ATR ratio: **{avg_ratio:.2f}x**.")
+                                        st.write(f"**{exceeded}/{total}** tweet days had next-day range above the normal swing. "
+                                                 f"**{up_moves}/{total}** closed up. Avg Swing ratio: **{avg_ratio:.2f}x**.")
 
-                                        st.subheader("ATR Ratio by Sentiment Bucket")
-                                        bucket_df = results_df.groupby('sentiment_bucket')['atr_ratio'].agg(['mean', 'count']).rename(columns={'mean': 'avg_atr_ratio', 'count': 'tweets'})
+                                        st.subheader("Swing Ratio by Sentiment Bucket")
+                                        bucket_df = results_df.groupby('sentiment_bucket')['atr_ratio'].agg(['mean', 'count']).rename(columns={'mean': 'avg_swing_ratio', 'count': 'tweets'})
                                         st.dataframe(bucket_df, use_container_width=True)
 
                 except Exception as e:
-                    st.error(f"ATR Analysis failed: {str(e)}\n{traceback.format_exc()}")
+                    st.error(f"Price Swing Analysis failed: {str(e)}\n{traceback.format_exc()}")
 
 # ── TWEET ANALYSIS TAB (Tweet Impact + Post-Tweet Trend) ─────────────────────
 with tab_impact:
@@ -957,66 +957,27 @@ with tab_stock:
     st.markdown("---")
     st.markdown("### Stock Chart")
 
-    with st.expander("📖 Glossary — click to learn what each term means"):
-        g1, g2 = st.columns(2)
-        with g1:
-            st.markdown("""
-**Candlestick Chart**
-A visual way to see how a stock moved each day. Each "candle" shows where the price started, where it ended, and how high/low it went in between. 🟢 Green = the stock went up that day. 🔴 Red = it went down.
-
-**SMA — Simple Moving Average**
-Imagine averaging a student's last 20 test scores to get a sense of how they're really doing, ignoring one-off good or bad days. SMA does the same for a stock's price. If the price is above its average, things are generally trending up.
-
-**EMA — Exponential Moving Average**
-Same idea as SMA, but it pays more attention to what happened recently. Think of it like a coach who cares more about your last few games than games from months ago.
-
-**Bollinger Bands**
-Three lines drawn around the price — a middle line (the average) and an upper and lower boundary. When the price touches the top boundary, the stock might be getting too expensive too fast. Near the bottom boundary, it might be getting oversold. When the bands spread wide, the stock is moving a lot; when they're tight, it's calm.
-
-**Volume**
-Simply how many shares were bought and sold that day. If a stock jumps in price but barely anyone is trading it, that move might not last. A big price move with lots of trading behind it is more meaningful.
-""")
-        with g2:
-            st.markdown("""
-**RSI — Relative Strength Index**
-A speedometer for how fast a stock has been moving. It goes from 0 to 100. Above 70 means the stock has been rising very fast and might be due for a cooldown. Below 30 means it's been falling fast and might bounce back. Between 30–70 is the normal zone.
-
-**MACD**
-A way to spot when a stock's momentum is shifting. It compares two moving averages and shows when they cross each other — like watching two runners where one overtakes the other. When the MACD line crosses above the signal line, it's often seen as a good sign. Below is a warning sign.
-
-**Support Level**
-A price the stock keeps bouncing off of when it drops — like a floor. Buyers tend to step in at this price, so the stock rarely falls through it easily.
-
-**Resistance Level**
-The opposite of support — a price the stock keeps hitting but struggling to break through, like a ceiling. Sellers tend to show up here.
-
-**ATR — Average True Range**
-Measures how much a stock typically swings up and down in a normal day. A high ATR means the stock is jumpy and moves a lot. A low ATR means it's more stable and predictable.
-""")
-
-    st.markdown("---")
-
     # Controls
     ctrl1, ctrl2, ctrl3 = st.columns(3)
     with ctrl1:
         st.markdown("**Chart & Moving Averages**")
         chart_type = st.radio("Chart type", ["Candlestick", "Line"], horizontal=True)
-        show_sma_20 = st.checkbox("SMA 20", value=True)
-        show_sma_50 = st.checkbox("SMA 50", value=True)
-        show_sma_200 = st.checkbox("SMA 200")
-        show_ema_12 = st.checkbox("EMA 12")
-        show_ema_26 = st.checkbox("EMA 26")
+        show_sma_20 = st.checkbox("Simple Moving Average 20", value=True)
+        show_sma_50 = st.checkbox("Simple Moving Average 50", value=True)
+        show_sma_200 = st.checkbox("Simple Moving Average 200")
+        show_ema_12 = st.checkbox("Recent Trend Average 12")
+        show_ema_26 = st.checkbox("Recent Trend Average 26")
     with ctrl2:
-        st.markdown("**Bollinger Bands**")
-        show_bb = st.checkbox("Show Bollinger Bands", value=True)
-        bb_period = st.slider("BB Period", 5, 50, 20, disabled=not show_bb)
-        bb_std_val = st.slider("BB Std Dev", 1.0, 3.0, 2.0, 0.5, disabled=not show_bb)
+        st.markdown("**Price Boundaries**")
+        show_bb = st.checkbox("Show Price Boundaries", value=True)
+        bb_period = st.slider("Boundary Period", 5, 50, 20, disabled=not show_bb)
+        bb_std_val = st.slider("Boundary Width", 1.0, 3.0, 2.0, 0.5, disabled=not show_bb)
     with ctrl3:
         st.markdown("**Indicators**")
-        show_rsi = st.checkbox("RSI", value=True)
-        rsi_period = st.slider("RSI Period", 5, 30, 14, disabled=not show_rsi)
-        show_macd = st.checkbox("MACD", value=True)
-        st.caption("MACD uses standard 12/26/9 periods")
+        show_rsi = st.checkbox("Momentum Speedometer", value=True)
+        rsi_period = st.slider("Momentum Period", 5, 30, 14, disabled=not show_rsi)
+        show_macd = st.checkbox("Trend Shift Indicator", value=True)
+        st.caption("Trend Shift uses standard 12/26/9 periods")
 
     run_stock_analysis = st.button("Load Chart", type="primary")
     stock_chart_container = st.container()
@@ -1105,12 +1066,12 @@ Measures how much a stock typically swings up and down in a normal day. A high A
                                     rsi_row_num = n_rows_chart + 1
                                     n_rows_chart += 1
                                     row_heights_chart.append(0.125)
-                                    subplot_titles_chart.append(f"RSI ({rsi_period})")
+                                    subplot_titles_chart.append(f"Momentum Speedometer ({rsi_period})")
                                 if show_macd:
                                     macd_row_num = n_rows_chart + 1
                                     n_rows_chart += 1
                                     row_heights_chart.append(0.125)
-                                    subplot_titles_chart.append("MACD (12/26/9)")
+                                    subplot_titles_chart.append("Trend Shift Indicator (12/26/9)")
 
                                 fig = make_subplots(
                                     rows=n_rows_chart, cols=1,
@@ -1136,17 +1097,17 @@ Measures how much a stock typically swings up and down in a normal day. A high A
 
                                 # Bollinger Bands
                                 if show_bb:
-                                    fig.add_trace(go.Scatter(x=ts, y=display_df['bb_upper'], name="BB Upper", line=dict(color='rgba(150,150,150,0.5)', width=1), showlegend=False), row=1, col=1)
-                                    fig.add_trace(go.Scatter(x=ts, y=display_df['bb_lower'], name="BB Lower", line=dict(color='rgba(150,150,150,0.5)', width=1), fill='tonexty', fillcolor='rgba(150,150,150,0.06)', showlegend=False), row=1, col=1)
-                                    fig.add_trace(go.Scatter(x=ts, y=display_df['bb_mid'], name="BB Mid", line=dict(color='rgba(180,180,180,0.7)', width=1, dash='dot')), row=1, col=1)
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['bb_upper'], name="Upper Boundary", line=dict(color='rgba(150,150,150,0.5)', width=1), showlegend=False), row=1, col=1)
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['bb_lower'], name="Lower Boundary", line=dict(color='rgba(150,150,150,0.5)', width=1), fill='tonexty', fillcolor='rgba(150,150,150,0.06)', showlegend=False), row=1, col=1)
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['bb_mid'], name="Mid Boundary", line=dict(color='rgba(180,180,180,0.7)', width=1, dash='dot')), row=1, col=1)
 
                                 # Moving averages
                                 ma_config = {
-                                    'sma_20':  ('SMA 20',  '#FF9800', show_sma_20),
-                                    'sma_50':  ('SMA 50',  '#9C27B0', show_sma_50),
-                                    'sma_200': ('SMA 200', '#F44336', show_sma_200),
-                                    'ema_12':  ('EMA 12',  '#00BCD4', show_ema_12),
-                                    'ema_26':  ('EMA 26',  '#8BC34A', show_ema_26),
+                                    'sma_20':  ('Simple Moving Average 20',  '#FF9800', show_sma_20),
+                                    'sma_50':  ('Simple Moving Average 50',  '#9C27B0', show_sma_50),
+                                    'sma_200': ('Simple Moving Average 200', '#F44336', show_sma_200),
+                                    'ema_12':  ('Recent Trend Average 12',  '#00BCD4', show_ema_12),
+                                    'ema_26':  ('Recent Trend Average 26',  '#8BC34A', show_ema_26),
                                 }
                                 for col_name, (label, color, show) in ma_config.items():
                                     if show:
@@ -1158,14 +1119,14 @@ Measures how much a stock typically swings up and down in a normal day. A high A
 
                                 # RSI
                                 if show_rsi and rsi_row_num:
-                                    fig.add_trace(go.Scatter(x=ts, y=display_df['rsi'], name="RSI", line=dict(color='#FF9800', width=1.5)), row=rsi_row_num, col=1)
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['rsi'], name="Momentum Speedometer", line=dict(color='#FF9800', width=1.5)), row=rsi_row_num, col=1)
                                     fig.add_hline(y=70, line=dict(color='red', width=1, dash='dash'), row=rsi_row_num, col=1)
                                     fig.add_hline(y=30, line=dict(color='green', width=1, dash='dash'), row=rsi_row_num, col=1)
                                     fig.update_yaxes(range=[0, 100], row=rsi_row_num, col=1)
 
                                 # MACD
                                 if show_macd and macd_row_num:
-                                    fig.add_trace(go.Scatter(x=ts, y=display_df['macd'], name="MACD", line=dict(color='#2196F3', width=1.5)), row=macd_row_num, col=1)
+                                    fig.add_trace(go.Scatter(x=ts, y=display_df['macd'], name="Trend Shift Indicator", line=dict(color='#2196F3', width=1.5)), row=macd_row_num, col=1)
                                     fig.add_trace(go.Scatter(x=ts, y=display_df['macd_signal'], name="Signal", line=dict(color='#FF9800', width=1.5)), row=macd_row_num, col=1)
                                     hist_colors = ['#26a69a' if v >= 0 else '#ef5350' for v in display_df['macd_hist'].fillna(0)]
                                     fig.add_trace(go.Bar(x=ts, y=display_df['macd_hist'], name="Histogram", marker_color=hist_colors, showlegend=False), row=macd_row_num, col=1)
@@ -1447,31 +1408,6 @@ with tab_drill:
 with tab_ctx:
     st.markdown("See whether a stock's price move was caused by a tweet — or by something bigger happening in the market.")
 
-    with st.expander("📖 Glossary — click to learn what each term means"):
-        gc1, gc2 = st.columns(2)
-        with gc1:
-            st.markdown("""
-**SPY (Market Benchmark)**
-SPY is an ETF that tracks the S&P 500 — basically the average performance of the 500 biggest companies in the US. Think of it as a thermometer for the whole stock market. If SPY goes up 2% and your stock also goes up 2%, the market did that — not the tweet.
-
-**Sector ETF**
-Every stock belongs to an industry group (tech, retail, energy, etc.). A sector ETF tracks just that group. For example, XLK tracks tech stocks. If Apple rises but so does all of tech, the industry moved — not something Apple-specific.
-
-**Indexed to 100**
-To fairly compare stocks with very different prices, we reset all of them to start at 100 on day one. After that, every point above or below 100 shows the percentage change. So a stock at 108 is up 8%, and one at 95 is down 5% — even if their actual prices are wildly different.
-""")
-        with gc2:
-            st.markdown("""
-**Alpha**
-Alpha is how much better (or worse) a stock did compared to the market. If the market went up 3% and your stock went up 7%, the alpha is +4% — that extra 4% is what might be explained by company-specific events like a CEO tweet.
-
-**Earnings Date**
-Four times a year, companies publicly report how much money they made. These announcements almost always cause big stock moves — up or down. If a tweet happened right around an earnings date, the earnings report is likely the real driver, not the tweet.
-
-**News Headlines**
-Real news articles published around the same time as the tweets. If a CEO tweeted something positive but there was also a major negative news story that day, the news probably had more impact on the stock price than the tweet.
-""")
-
     CEO_COMPANY_MAP = {
         "TSLA": "Tesla", "AAPL": "Apple", "MSFT": "Microsoft",
         "GOOGL": "Google", "GOOG": "Google", "DELL": "Dell",
@@ -1526,7 +1462,7 @@ Real news articles published around the same time as the tweets. If a CEO tweete
                         news = get_news_for_range(ticker_upper, company_name, news_start, news_end)
 
                         with ctx_container:
-                            st.subheader(f"{ticker_upper} vs SPY vs {sector_etf} — {date_display}")
+                            st.subheader(f"{ticker_upper} vs Overall Market vs Industry Group ({sector_etf}) — {date_display}")
                             st.caption("All series indexed to 100 at the start of the period — shows relative performance, not raw price.")
 
                             # Relative performance chart
@@ -1535,10 +1471,10 @@ Real news articles published around the same time as the tweets. If a CEO tweete
                                                      name=ticker_upper, line=dict(color='#2196F3', width=2)))
                             if spy_n is not None:
                                 fig.add_trace(go.Scatter(x=spy_n['timestamp'], y=spy_n['indexed'],
-                                                         name='SPY (Market)', line=dict(color='#9E9E9E', width=1.5, dash='dot')))
+                                                         name='Overall Market', line=dict(color='#9E9E9E', width=1.5, dash='dot')))
                             if sector_n is not None:
                                 fig.add_trace(go.Scatter(x=sector_n['timestamp'], y=sector_n['indexed'],
-                                                         name=sector_etf, line=dict(color='#FF9800', width=1.5, dash='dash')))
+                                                         name=f'Industry Group ({sector_etf})', line=dict(color='#FF9800', width=1.5, dash='dot')))
 
                             # Earnings markers
                             for ed in earnings_dates:
@@ -1568,18 +1504,18 @@ Real news articles published around the same time as the tweets. If a CEO tweete
                             m1, m2, m3, m4 = st.columns(4)
                             m1.metric(f"{ticker_upper} Return", f"{stock_ret:+.2f}%")
                             if spy_ret is not None:
-                                m2.metric("SPY Return", f"{spy_ret:+.2f}%")
+                                m2.metric("Overall Market Return", f"{spy_ret:+.2f}%")
                             if alpha_vs_spy is not None:
-                                m3.metric("Alpha vs Market", f"{alpha_vs_spy:+.2f}%",
-                                          help="How much better/worse the stock did vs SPY")
+                                m3.metric("Extra Performance vs Market", f"{alpha_vs_spy:+.2f}%",
+                                          help="How much better/worse the stock did vs the overall market")
                             if alpha_vs_sec is not None:
-                                m4.metric(f"Alpha vs {sector_etf}", f"{alpha_vs_sec:+.2f}%",
-                                          help=f"How much better/worse vs the sector ETF {sector_etf}")
+                                m4.metric(f"Extra Performance vs {sector_etf}", f"{alpha_vs_sec:+.2f}%",
+                                          help=f"How much better/worse vs the industry group {sector_etf}")
 
                             # Interpretation
                             if alpha_vs_spy is not None:
                                 if abs(alpha_vs_spy) < 1.0:
-                                    st.info(f"**{ticker_upper}** moved almost identically to the market — price changes this period are likely market-driven, not tweet-driven.")
+                                    st.info(f"**{ticker_upper}** generally moved with the market ({alpha_vs_spy:+.2f}% extra performance). The tweet likely had minimal impact.")
                                 elif alpha_vs_spy > 0:
                                     st.success(f"**{ticker_upper}** outperformed the market by {alpha_vs_spy:+.2f}%. That excess return is worth investigating for tweet/news correlation.")
                                 else:
