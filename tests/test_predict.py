@@ -32,7 +32,7 @@ NUMERIC_FEATURES = [
     "vix_at_tweet",
     "days_to_earnings",
     "prev_day_direction",
-    "news_sentiment_score",
+    "news_sentiment_score", "finbert_score",
 ]
 CATEGORICAL_FEATURES = ["refined_sentiment", "tone_category", "tweet_type"]
 ALL_FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES

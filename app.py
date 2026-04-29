@@ -267,31 +267,28 @@ def compute_impact_score(sentiment, likes=0, retweets=0, views=0, replies=0):
     return round(strength + reach, 1)
 
 # ── Shared inputs ─────────────────────────────────────────────────────────────
-st.subheader("Query Parameters")
+with st.sidebar:
+    st.header("Query Parameters")
 
-_ceo_labels = ["— select a CEO —"] + [
-    f"{v['name']}  (@{k})  —  {v['ticker']}"
-    for k, v in sorted(CEO_DATA.items(), key=lambda x: x[1]['name'])
-]
-_sel = st.selectbox("Select CEO", _ceo_labels, key="ceo_selector")
+    _ceo_labels = ["— select a CEO —"] + [
+        f"{v['name']}  (@{k})  —  {v['ticker']}"
+        for k, v in sorted(CEO_DATA.items(), key=lambda x: x[1]['name'])
+    ]
+    _sel = st.selectbox("Select CEO", _ceo_labels, key="ceo_selector")
 
-if _sel != "— select a CEO —":
-    ceo_handle = _sel.split("(@")[1].split(")")[0]
-    _auto_ticker = CEO_DATA[ceo_handle]["ticker"]
-    if st.session_state.get("_last_ceo_sel") != _sel:
-        st.session_state["ticker_override"] = _auto_ticker
-        st.session_state["_last_ceo_sel"] = _sel
-else:
-    ceo_handle = ""
-    if "_last_ceo_sel" in st.session_state:
-        del st.session_state["_last_ceo_sel"]
+    if _sel != "— select a CEO —":
+        ceo_handle = _sel.split("(@")[1].split(")")[0]
+        _auto_ticker = CEO_DATA[ceo_handle]["ticker"]
+        if st.session_state.get("_last_ceo_sel") != _sel:
+            st.session_state["ticker_override"] = _auto_ticker
+            st.session_state["_last_ceo_sel"] = _sel
+    else:
+        ceo_handle = ""
+        if "_last_ceo_sel" in st.session_state:
+            del st.session_state["_last_ceo_sel"]
 
-col_t, col_d1, col_d2 = st.columns(3)
-with col_t:
     stock_ticker = st.text_input("Stock Ticker (auto-filled, editable)", key="ticker_override", placeholder="e.g. TSLA")
-with col_d1:
     query_start_date = st.date_input("Start Date", value=datetime.now(pytz.utc).date() - timedelta(days=7))
-with col_d2:
     query_end_date = st.date_input("End Date (Optional)", value=None)
 
 if query_end_date:
