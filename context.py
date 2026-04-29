@@ -38,6 +38,10 @@ SECTOR_ETF_MAP = {
     "SOFI":  "XLK",
     "NFLX":  "XLC",
     "INTC":  "XLK",
+    "BOX":   "XLK",
+    "CRWD":  "XLK",
+    "SPOT":  "XLC",
+    "RIVN":  "XLY",
 }
 
 def get_sector_etf(ticker):

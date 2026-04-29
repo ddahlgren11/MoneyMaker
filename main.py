@@ -201,7 +201,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         "dkhos":          "UBER",
         "RobertIger":     "DIS",
         "Benioff":        "CRM",
-        "jensenhuang":    "NVDA",
+        # "jensenhuang": "NVDA",  # account inactive — only 7 tweets fetched
         "jack":           "SQ",
         "tobi":           "SHOP",
         "brian_armstrong": "COIN",
@@ -212,6 +212,12 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         "mtbarra":        "GM",    # Mary Barra, GM CEO
         "JimFarley98":    "F",     # Jim Farley, Ford CEO
         "AnthonyNoto":    "SOFI",  # Anthony Noto, SoFi CEO
+        "reedhastings":   "NFLX",  # Reed Hastings, Netflix co-founder/ex-CEO
+        "PGelsinger":     "INTC",  # Pat Gelsinger, Intel ex-CEO
+        "levie":          "BOX",   # Aaron Levie, Box CEO
+        "george_kurtz":   "CRWD",  # George Kurtz, CrowdStrike CEO
+        "eldsjal":        "SPOT",  # Daniel Ek, Spotify CEO
+        "RJScaringe":     "RIVN",  # RJ Scaringe, Rivian CEO
     }
 
     # Company names for news queries
@@ -237,6 +243,12 @@ async def process_and_save_all(db: Session = Depends(get_db)):
         "GM": "General Motors",
         "F": "Ford Motor",
         "SOFI": "SoFi Technologies",
+        "NFLX": "Netflix",
+        "INTC": "Intel",
+        "BOX": "Box Inc",
+        "CRWD": "CrowdStrike",
+        "SPOT": "Spotify",
+        "RIVN": "Rivian",
     }
 
     total_records = 0
