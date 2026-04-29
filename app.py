@@ -231,18 +231,67 @@ def load_dashboard_data():
 
 proc = get_processor()
 
-# Shared inputs — visible on every tab
-st.subheader("Query Parameters")
-col1, col2 = st.columns(2)
-with col1:
-    ceo_handle = st.text_input("CEO Twitter Handle", value="", placeholder="e.g. elonmusk")
-with col2:
-    stock_ticker = st.text_input("Stock Ticker", value="", placeholder="e.g. TSLA")
+# ── CEO master list (single source of truth for the whole app) ────────────────
+CEO_DATA = {
+    "ajassy":          {"name": "Andy Jassy",         "ticker": "AMZN"},
+    "AnthonyNoto":     {"name": "Anthony Noto",       "ticker": "SOFI"},
+    "bchesky":         {"name": "Brian Chesky",       "ticker": "ABNB"},
+    "Benioff":         {"name": "Marc Benioff",       "ticker": "CRM"},
+    "brian_armstrong": {"name": "Brian Armstrong",    "ticker": "COIN"},
+    "CathieDWood":     {"name": "Cathie Wood",        "ticker": "ARKK"},
+    "dkhos":           {"name": "Dara Khosrowshahi",  "ticker": "UBER"},
+    "eldsjal":         {"name": "Daniel Ek",          "ticker": "SPOT"},
+    "elonmusk":        {"name": "Elon Musk",          "ticker": "TSLA"},
+    "george_kurtz":    {"name": "George Kurtz",       "ticker": "CRWD"},
+    "jack":            {"name": "Jack Dorsey",        "ticker": "SQ"},
+    "JimFarley98":     {"name": "Jim Farley",         "ticker": "F"},
+    "levie":           {"name": "Aaron Levie",        "ticker": "BOX"},
+    "LisaSu":          {"name": "Lisa Su",            "ticker": "AMD"},
+    "MichaelDell":     {"name": "Michael Dell",       "ticker": "DELL"},
+    "mtbarra":         {"name": "Mary Barra",         "ticker": "GM"},
+    "PGelsinger":      {"name": "Pat Gelsinger",      "ticker": "INTC"},
+    "reedhastings":    {"name": "Reed Hastings",      "ticker": "NFLX"},
+    "RJScaringe":      {"name": "RJ Scaringe",        "ticker": "RIVN"},
+    "RobertIger":      {"name": "Bob Iger",           "ticker": "DIS"},
+    "satyanadella":    {"name": "Satya Nadella",      "ticker": "MSFT"},
+    "sundarpichai":    {"name": "Sundar Pichai",      "ticker": "GOOGL"},
+    "tim_cook":        {"name": "Tim Cook",           "ticker": "AAPL"},
+    "tobi":            {"name": "Tobi Lütke",         "ticker": "SHOP"},
+}
 
-col3, col4 = st.columns(2)
-with col3:
+def compute_impact_score(sentiment, likes=0, retweets=0, views=0, replies=0):
+    """0–100 score: 50 pts from sentiment strength + 50 pts from engagement reach."""
+    strength = abs(float(sentiment or 0)) * 50
+    engagement = int(likes or 0) + int(retweets or 0) + int(replies or 0)
+    reach = min(50.0, np.log1p(engagement) / np.log1p(1_000_000) * 50)
+    return round(strength + reach, 1)
+
+# ── Shared inputs ─────────────────────────────────────────────────────────────
+st.subheader("Query Parameters")
+
+_ceo_labels = ["— select a CEO —"] + [
+    f"{v['name']}  (@{k})  —  {v['ticker']}"
+    for k, v in sorted(CEO_DATA.items(), key=lambda x: x[1]['name'])
+]
+_sel = st.selectbox("Select CEO", _ceo_labels, key="ceo_selector")
+
+if _sel != "— select a CEO —":
+    ceo_handle = _sel.split("(@")[1].split(")")[0]
+    _auto_ticker = CEO_DATA[ceo_handle]["ticker"]
+    if st.session_state.get("_last_ceo_sel") != _sel:
+        st.session_state["ticker_override"] = _auto_ticker
+        st.session_state["_last_ceo_sel"] = _sel
+else:
+    ceo_handle = ""
+    if "_last_ceo_sel" in st.session_state:
+        del st.session_state["_last_ceo_sel"]
+
+col_t, col_d1, col_d2 = st.columns(3)
+with col_t:
+    stock_ticker = st.text_input("Stock Ticker (auto-filled, editable)", key="ticker_override", placeholder="e.g. TSLA")
+with col_d1:
     query_start_date = st.date_input("Start Date", value=datetime.now(pytz.utc).date() - timedelta(days=7))
-with col4:
+with col_d2:
     query_end_date = st.date_input("End Date (Optional)", value=None)
 
 if query_end_date:
@@ -403,7 +452,11 @@ with tab_data:
                                 filtered['refined_sentiment'] = filtered['sentiment'].apply(get_refined_sentiment)
                                 filtered['tone'] = filtered.apply(lambda r: get_tone_category(str(r['text']), float(r['sentiment'])), axis=1)
                                 filtered['tweet_type'] = filtered['text'].apply(get_tweet_type)
-                                st.dataframe(filtered[['date', 'text', 'sentiment', 'refined_sentiment', 'tone', 'tweet_type']], use_container_width=True)
+                                filtered['impact_score'] = [
+                                    compute_impact_score(row['sentiment'], row.get('likes', 0), row.get('retweet_count', 0), row.get('view_count', 0), row.get('reply_count', 0))
+                                    for _, row in filtered.iterrows()
+                                ]
+                                st.dataframe(filtered[['date', 'text', 'sentiment', 'refined_sentiment', 'tone', 'tweet_type', 'impact_score']], use_container_width=True)
                     else:
                         with data_results:
                             st.info("No tweets found.")
@@ -1137,18 +1190,7 @@ Measures how much a stock typically swings up and down in a normal day. A high A
 with tab_drill:
     st.markdown("Fetch tweets, select one, then choose a stock to see how it moved around that tweet's date.")
 
-    CEO_TICKER_MAP = {
-        "elonmusk": "TSLA",
-        "tim_cook": "AAPL",
-        "satyanadella": "MSFT",
-        "sundarpichai": "GOOGL",
-        "MichaelDell": "DELL",
-        "LisaSu": "AMD",
-        "ajassy": "AMZN",
-        "bchesky": "ABNB",
-        "dkhos": "UBER",
-        "RobertIger": "DIS",
-    }
+    CEO_TICKER_MAP = {k: v["ticker"] for k, v in CEO_DATA.items()}
 
     if st.button("Fetch Tweets", type="primary", key="drill_fetch"):
         if not ceo_handle:
@@ -1164,6 +1206,10 @@ with tab_drill:
                         tweets_df['refined_sentiment'] = tweets_df['sentiment'].apply(get_refined_sentiment)
                         tweets_df['tone'] = tweets_df.apply(lambda r: get_tone_category(str(r['text']), float(r['sentiment'])), axis=1)
                         tweets_df['tweet_type'] = tweets_df['text'].apply(get_tweet_type)
+                        tweets_df['impact_score'] = [
+                            compute_impact_score(row['sentiment'], row.get('likes', 0), row.get('retweet_count', 0), row.get('view_count', 0), row.get('reply_count', 0))
+                            for _, row in tweets_df.iterrows()
+                        ]
                     st.session_state['drill_tweets'] = tweets_df
                     st.session_state['drill_ceo'] = ceo_handle
                 except Exception as e:
@@ -1193,7 +1239,7 @@ with tab_drill:
 
         st.markdown(f"**Tweets for @{st.session_state.get('drill_ceo', '')}** — {len(fdf)} shown, click a row to select it")
 
-        show_cols = [c for c in ['date_str', 'text', 'sentiment', 'refined_sentiment', 'tone', 'tweet_type'] if c in fdf.columns]
+        show_cols = [c for c in ['date_str', 'text', 'impact_score', 'sentiment', 'refined_sentiment', 'tone', 'tweet_type'] if c in fdf.columns]
         event = st.dataframe(
             fdf[show_cols].rename(columns={'date_str': 'date'}),
             use_container_width=True,
