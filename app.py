@@ -1,6 +1,6 @@
 import os
+import requests
 import streamlit as st
-import asyncio
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -10,12 +10,57 @@ import traceback
 
 import numpy as np
 
-from processor import DataProcessor
 from classifier import get_refined_sentiment, get_tone_category, get_tweet_type
 from context import get_earnings_dates, get_news_for_range, get_sector_etf
-from sqlalchemy import create_engine, text
-from dotenv import load_dotenv
-load_dotenv()
+
+# ---------------------------------------------------------------------------
+# API CLIENT HELPERS
+# ---------------------------------------------------------------------------
+_API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
+
+def api_get(path, params=None, timeout=120):
+    try:
+        r = requests.get(f"{_API_BASE}{path}", params=params, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        return {"status": "error", "message": str(exc), "data": []}
+
+def api_post(path, data=None, timeout=300):
+    try:
+        r = requests.post(f"{_API_BASE}{path}", json=data, timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception as exc:
+        return {"status": "error", "message": str(exc)}
+
+def _fetch_tweets_df(ceo_handle):
+    """Call /api/tweets/{ceo} and return a DataFrame (empty on error)."""
+    resp = api_get(f"/api/tweets/{ceo_handle}", timeout=180)
+    if resp.get("status") != "success" or not resp.get("data"):
+        return pd.DataFrame()
+    df = pd.DataFrame(resp["data"])
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"], utc=True)
+    return df
+
+def _fetch_stocks_df(ticker, start_date=None, end_date=None):
+    """Call /api/stocks/{ticker} and return a DataFrame indexed by timestamp."""
+    params = {}
+    if start_date:
+        params["start_date"] = start_date.isoformat() if hasattr(start_date, "isoformat") else str(start_date)
+    if end_date:
+        params["end_date"] = end_date.isoformat() if hasattr(end_date, "isoformat") else str(end_date)
+    resp = api_get(f"/api/stocks/{ticker}", params=params, timeout=60)
+    if resp.get("status") != "success" or not resp.get("data"):
+        return pd.DataFrame()
+    df = pd.DataFrame(resp["data"])
+    if df.empty:
+        return df
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df = df.set_index("timestamp").sort_index()
+    return df
 
 st.set_page_config(page_title="MoneyMaker", layout="wide", page_icon="📈")
 
@@ -206,30 +251,13 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-@st.cache_resource
-def get_processor():
-    return DataProcessor()
-
-@st.cache_resource
-def get_db_engine():
-    url = os.getenv("DATABASE_URL")
-    if not url:
-        return None
-    return create_engine(url)
-
 @st.cache_data(ttl=300)
 def load_dashboard_data():
-    engine = get_db_engine()
-    if engine is None:
+    resp = api_get("/api/merged", params={"limit": 5000})
+    if resp.get("status") != "success" or not resp.get("data"):
         return None
-    try:
-        with engine.connect() as conn:
-            df = pd.read_sql(text("SELECT * FROM merged_data"), conn)
-        return df if not df.empty else None
-    except Exception:
-        return None
-
-proc = get_processor()
+    df = pd.DataFrame(resp["data"])
+    return df if not df.empty else None
 
 # ── CEO master list (single source of truth for the whole app) ────────────────
 CEO_DATA = {
@@ -295,14 +323,6 @@ if query_end_date:
     date_display = f"{query_start_date.strftime('%Y-%m-%d')} to {query_end_date.strftime('%Y-%m-%d')}"
 else:
     date_display = f"From {query_start_date.strftime('%Y-%m-%d')}"
-
-def run_async(coro):
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
 
 def filter_tweets_by_date(tweets_df):
     if tweets_df['date'].dt.tz is None:
@@ -437,7 +457,7 @@ with tab_data:
         else:
             with st.spinner(f"Pulling tweets for @{ceo_handle}..."):
                 try:
-                    tweets_df = run_async(proc.get_tweets(ceo_handle))
+                    tweets_df = _fetch_tweets_df(ceo_handle)
                     if not tweets_df.empty and 'date' in tweets_df.columns:
                         filtered = filter_tweets_by_date(tweets_df).sort_values('date', ascending=False)
                         filtered['date'] = filtered['date'].dt.strftime('%Y-%m-%d %H:%M:%S')
@@ -446,14 +466,12 @@ with tab_data:
                             if filtered.empty:
                                 st.info("No tweets found for this date range.")
                             else:
-                                filtered['refined_sentiment'] = filtered['sentiment'].apply(get_refined_sentiment)
-                                filtered['tone'] = filtered.apply(lambda r: get_tone_category(str(r['text']), float(r['sentiment'])), axis=1)
-                                filtered['tweet_type'] = filtered['text'].apply(get_tweet_type)
                                 filtered['impact_score'] = [
                                     compute_impact_score(row['sentiment'], row.get('likes', 0), row.get('retweet_count', 0), row.get('view_count', 0), row.get('reply_count', 0))
                                     for _, row in filtered.iterrows()
                                 ]
-                                st.dataframe(filtered[['date', 'text', 'sentiment', 'refined_sentiment', 'tone', 'tweet_type', 'impact_score']], use_container_width=True)
+                                show = [c for c in ['date', 'text', 'sentiment', 'refined_sentiment', 'tone_category', 'tweet_type', 'impact_score'] if c in filtered.columns]
+                                st.dataframe(filtered[show], use_container_width=True)
                     else:
                         with data_results:
                             st.info("No tweets found.")
@@ -468,14 +486,15 @@ with tab_data:
                 try:
                     start_dt = datetime.combine(query_start_date, datetime.min.time()).replace(tzinfo=pytz.utc) - timedelta(days=2)
                     end_dt = datetime.combine(query_end_date, datetime.max.time()).replace(tzinfo=pytz.utc) + timedelta(days=2) if query_end_date else None
-                    stocks_df = proc.get_stocks(stock_ticker, start_date=start_dt, end_date=end_dt)
+                    stocks_df = _fetch_stocks_df(stock_ticker, start_date=start_dt, end_date=end_dt)
                     if not stocks_df.empty:
-                        stocks_df = stocks_df.reset_index()
-                        if 'timestamp' in stocks_df.columns:
-                            stocks_df['timestamp'] = stocks_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        display = stocks_df.reset_index()
+                        if 'timestamp' in display.columns:
+                            display['timestamp'] = display['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        show_cols = [c for c in ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'trade_count', 'vwap'] if c in display.columns]
                         with data_results:
                             st.subheader(f"Stock Data for {stock_ticker.upper()} ({date_display})")
-                            st.dataframe(stocks_df[['timestamp', 'open', 'high', 'low', 'close', 'volume', 'trade_count', 'vwap']], use_container_width=True)
+                            st.dataframe(display[show_cols], use_container_width=True)
                     else:
                         with data_results:
                             st.info("No stock data found for this date range.")
@@ -486,61 +505,22 @@ with tab_data:
         if not ceo_handle or not stock_ticker:
             st.error("Please enter a CEO Twitter Handle and a Stock Ticker.")
         else:
-            with st.spinner("Pulling and merging data..."):
+            with st.spinner("Loading merged data from database..."):
                 try:
-                    tweets_df = run_async(proc.get_tweets(ceo_handle))
-                    if not tweets_df.empty and 'date' in tweets_df.columns:
-                        tweets_df = filter_tweets_by_date(tweets_df)
-
-                    if tweets_df.empty:
-                        with data_results:
-                            st.info("No tweets found for this date range to merge.")
+                    params = {"ceo": ceo_handle, "ticker": stock_ticker, "limit": 500}
+                    if query_start_date:
+                        params["start_date"] = query_start_date.isoformat()
+                    if query_end_date:
+                        params["end_date"] = query_end_date.isoformat()
+                    resp = api_get("/api/merged", params=params)
+                    if resp.get("status") != "success":
+                        st.error(f"API error: {resp.get('message', 'unknown')}")
                     else:
-                        min_date = tweets_df['date'].min() - timedelta(days=5)
-                        max_date = tweets_df['date'].max() + timedelta(days=5)
-                        stocks_df = proc.get_stocks(stock_ticker, start_date=min_date, end_date=max_date)
-
-                        if not stocks_df.empty:
-                            if isinstance(stocks_df.index, pd.MultiIndex):
-                                stocks_df['date_only'] = stocks_df.index.get_level_values('timestamp').date
-                            else:
-                                stocks_df['date_only'] = stocks_df.index.date
-
-                        merged_data = []
-                        for _, row in tweets_df.iterrows():
-                            sentiment = float(row['sentiment'])
-                            text = str(row['text'])
-                            tweet_date = row['date']
-                            target_date_only = weekend_shift(tweet_date).date()
-
-                            stock_close = stock_volume = stock_open_close_diff = None
-                            if not stocks_df.empty:
-                                valid = stocks_df[stocks_df['date_only'] >= target_date_only]
-                                if not valid.empty:
-                                    stock_close = float(valid['close'].iloc[0])
-                                    stock_volume = float(valid['volume'].iloc[0])
-                                    stock_open = float(valid['open'].iloc[0])
-                                    stock_open_close_diff = float(stock_open - stock_close)
-
-                            merged_data.append({
-                                "date": tweet_date.strftime('%Y-%m-%d %H:%M:%S'),
-                                "ceo": ceo_handle,
-                                "tweet_text": text,
-                                "sentiment_score": sentiment,
-                                "refined_sentiment": get_refined_sentiment(sentiment),
-                                "tone_category": get_tone_category(text, sentiment),
-                                "tweet_type": get_tweet_type(text),
-                                "stock_ticker": stock_ticker,
-                                "stock_close": stock_close,
-                                "stock_volume": stock_volume,
-                                "stock_open_close_diff": stock_open_close_diff,
-                            })
-
-                        merged_df = pd.DataFrame(merged_data).sort_values('date', ascending=False)
+                        merged_df = pd.DataFrame(resp.get("data", []))
                         with data_results:
                             st.subheader(f"Merged Data (@{ceo_handle} & {stock_ticker.upper()}) ({date_display})")
                             if merged_df.empty:
-                                st.info("No merged data found.")
+                                st.info("No merged data found. Run /process/all first to populate the database.")
                             else:
                                 st.dataframe(merged_df, use_container_width=True)
                 except Exception as e:
@@ -559,7 +539,7 @@ with tab_stock:
         else:
             with st.spinner("Running Price Swing Analysis..."):
                 try:
-                    tweets_df = run_async(proc.get_tweets(ceo_handle))
+                    tweets_df = _fetch_tweets_df(ceo_handle)
                     if not tweets_df.empty and 'date' in tweets_df.columns:
                         tweets_df = filter_tweets_by_date(tweets_df)
 
@@ -574,16 +554,13 @@ with tab_stock:
                         else:
                             min_date = tweets_df['date'].min() - timedelta(days=40)
                             max_date = tweets_df['date'].max() + timedelta(days=5)
-                            stocks_df = proc.get_stocks(stock_ticker, start_date=min_date, end_date=max_date)
+                            stocks_df = _fetch_stocks_df(stock_ticker, start_date=min_date, end_date=max_date)
 
                             if stocks_df.empty:
                                 with atr_results_container:
                                     st.info("No stock data found to analyze.")
                             else:
-                                if isinstance(stocks_df.index, pd.MultiIndex):
-                                    stocks_df['date_only'] = stocks_df.index.get_level_values('timestamp').date
-                                else:
-                                    stocks_df['date_only'] = stocks_df.index.date
+                                stocks_df['date_only'] = stocks_df.index.date
 
                                 stocks_df['prev_close'] = stocks_df['close'].shift(1)
                                 stocks_df['tr1'] = stocks_df['high'] - stocks_df['low']
@@ -679,7 +656,7 @@ with tab_impact:
         else:
             with st.spinner("Running Tweet Impact Analysis..."):
                 try:
-                    tweets_df = run_async(proc.get_tweets(ceo_handle))
+                    tweets_df = _fetch_tweets_df(ceo_handle)
                     if not tweets_df.empty and 'date' in tweets_df.columns:
                         tweets_df = filter_tweets_by_date(tweets_df)
 
@@ -692,19 +669,15 @@ with tab_impact:
                             with impact_results_container:
                                 st.info("No high-sentiment tweets (>= 0.5) found in this date range.")
                         else:
-                            # Fetch extra history for rolling baselines
                             min_date = tweets_df['date'].min() - timedelta(days=40)
                             max_date = tweets_df['date'].max() + timedelta(days=2)
-                            stocks_df = proc.get_stocks(stock_ticker, start_date=min_date, end_date=max_date)
+                            stocks_df = _fetch_stocks_df(stock_ticker, start_date=min_date, end_date=max_date)
 
                             if stocks_df.empty:
                                 with impact_results_container:
                                     st.info("No stock data found to analyze.")
                             else:
-                                if isinstance(stocks_df.index, pd.MultiIndex):
-                                    stocks_df['date_only'] = stocks_df.index.get_level_values('timestamp').date
-                                else:
-                                    stocks_df['date_only'] = stocks_df.index.date
+                                stocks_df['date_only'] = stocks_df.index.date
 
                                 # 14-day rolling baselines
                                 stocks_df['day_move'] = abs(stocks_df['close'] - stocks_df['open'])
@@ -815,7 +788,7 @@ with tab_impact:
         else:
             with st.spinner("Running Post-Tweet Trend Analysis..."):
                 try:
-                    tweets_df = run_async(proc.get_tweets(ceo_handle))
+                    tweets_df = _fetch_tweets_df(ceo_handle)
                     if not tweets_df.empty and 'date' in tweets_df.columns:
                         tweets_df = filter_tweets_by_date(tweets_df)
 
@@ -828,19 +801,15 @@ with tab_impact:
                             with trend_results_container:
                                 st.info("No high-sentiment tweets (>= 0.5) found in this date range.")
                         else:
-                            # Fetch enough forward data to cover max_days trading days after last tweet
                             min_date = tweets_df['date'].min() - timedelta(days=5)
                             max_date = tweets_df['date'].max() + timedelta(days=max_days * 2)
-                            stocks_df = proc.get_stocks(stock_ticker, start_date=min_date, end_date=max_date)
+                            stocks_df = _fetch_stocks_df(stock_ticker, start_date=min_date, end_date=max_date)
 
                             if stocks_df.empty:
                                 with trend_results_container:
                                     st.info("No stock data found to analyze.")
                             else:
-                                if isinstance(stocks_df.index, pd.MultiIndex):
-                                    stocks_df['date_only'] = stocks_df.index.get_level_values('timestamp').date
-                                else:
-                                    stocks_df['date_only'] = stocks_df.index.date
+                                stocks_df['date_only'] = stocks_df.index.date
 
                                 # Ordered list of trading days for indexing
                                 trading_days = sorted(stocks_df['date_only'].unique())
@@ -988,18 +957,17 @@ with tab_stock:
         else:
             with st.spinner(f"Loading {stock_ticker.upper()} data..."):
                 try:
-                    # Fetch with 250-day warmup so SMA 200 is valid from day 1 of the display range
                     warmup_start = datetime.combine(query_start_date, datetime.min.time()).replace(tzinfo=pytz.utc) - timedelta(days=250)
                     fetch_end = datetime.combine(query_end_date, datetime.max.time()).replace(tzinfo=pytz.utc) if query_end_date else None
 
-                    stocks_df = proc.get_stocks(stock_ticker, start_date=warmup_start, end_date=fetch_end)
+                    stocks_df = _fetch_stocks_df(stock_ticker, start_date=warmup_start, end_date=fetch_end)
 
                     if stocks_df.empty:
                         with stock_chart_container:
                             st.info("No stock data found for this ticker and date range.")
                     else:
                         stocks_df = stocks_df.reset_index()
-                        stocks_df['timestamp'] = pd.to_datetime(stocks_df['timestamp'])
+                        stocks_df['timestamp'] = pd.to_datetime(stocks_df['timestamp'], utc=True)
                         stocks_df = stocks_df.sort_values('timestamp')
 
                         # ── Indicators ────────────────────────────────────────
@@ -1156,14 +1124,11 @@ with tab_drill:
         else:
             with st.spinner(f"Fetching tweets for @{ceo_handle}..."):
                 try:
-                    tweets_df = run_async(proc.get_tweets(ceo_handle))
+                    tweets_df = _fetch_tweets_df(ceo_handle)
                     if not tweets_df.empty and 'date' in tweets_df.columns:
                         tweets_df = filter_tweets_by_date(tweets_df)
                         tweets_df = tweets_df.sort_values('date', ascending=False).reset_index(drop=True)
                         tweets_df['date_str'] = tweets_df['date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                        tweets_df['refined_sentiment'] = tweets_df['sentiment'].apply(get_refined_sentiment)
-                        tweets_df['tone'] = tweets_df.apply(lambda r: get_tone_category(str(r['text']), float(r['sentiment'])), axis=1)
-                        tweets_df['tweet_type'] = tweets_df['text'].apply(get_tweet_type)
                         tweets_df['impact_score'] = [
                             compute_impact_score(row['sentiment'], row.get('likes', 0), row.get('retweet_count', 0), row.get('view_count', 0), row.get('reply_count', 0))
                             for _, row in tweets_df.iterrows()
@@ -1181,23 +1146,25 @@ with tab_drill:
             sent_opts = sorted(df['refined_sentiment'].unique().tolist()) if 'refined_sentiment' in df.columns else []
             sent_filter = st.multiselect("Filter by Sentiment", sent_opts, key="drill_sent_filter")
         with fc2:
-            tone_opts = sorted(df['tone'].unique().tolist()) if 'tone' in df.columns else []
+            tone_col = 'tone_category' if 'tone_category' in df.columns else 'tone'
+            tone_opts = sorted(df[tone_col].unique().tolist()) if tone_col in df.columns else []
             tone_filter = st.multiselect("Filter by Tone", tone_opts, key="drill_tone_filter")
         with fc3:
             type_opts = sorted(df['tweet_type'].unique().tolist()) if 'tweet_type' in df.columns else []
             type_filter = st.multiselect("Filter by Type", type_opts, key="drill_type_filter")
 
         fdf = df.copy()
-        if sent_filter:
+        if sent_filter and 'refined_sentiment' in fdf.columns:
             fdf = fdf[fdf['refined_sentiment'].isin(sent_filter)]
-        if tone_filter:
-            fdf = fdf[fdf['tone'].isin(tone_filter)]
-        if type_filter:
+        tone_col = 'tone_category' if 'tone_category' in fdf.columns else 'tone'
+        if tone_filter and tone_col in fdf.columns:
+            fdf = fdf[fdf[tone_col].isin(tone_filter)]
+        if type_filter and 'tweet_type' in fdf.columns:
             fdf = fdf[fdf['tweet_type'].isin(type_filter)]
 
         st.markdown(f"**Tweets for @{st.session_state.get('drill_ceo', '')}** — {len(fdf)} shown, click a row to select it")
 
-        show_cols = [c for c in ['date_str', 'text', 'impact_score', 'sentiment', 'refined_sentiment', 'tone', 'tweet_type'] if c in fdf.columns]
+        show_cols = [c for c in ['date_str', 'text', 'impact_score', 'sentiment', 'refined_sentiment', 'tone_category', 'tweet_type'] if c in fdf.columns]
         event = st.dataframe(
             fdf[show_cols].rename(columns={'date_str': 'date'}),
             use_container_width=True,
@@ -1240,13 +1207,13 @@ with tab_drill:
 
                 with st.spinner(f"Loading {drill_ticker.upper()} around {tweet_date_str[:10]}..."):
                     try:
-                        stocks_df = proc.get_stocks(drill_ticker, start_date=fetch_start, end_date=fetch_end)
+                        stocks_df = _fetch_stocks_df(drill_ticker, start_date=fetch_start, end_date=fetch_end)
 
                         if stocks_df.empty:
                             st.info("No stock data found for this ticker in this window.")
                         else:
                             stocks_df = stocks_df.reset_index()
-                            stocks_df['timestamp'] = pd.to_datetime(stocks_df['timestamp'])
+                            stocks_df['timestamp'] = pd.to_datetime(stocks_df['timestamp'], utc=True)
                             stocks_df = stocks_df.sort_values('timestamp')
 
                             window_start = tweet_dt - timedelta(days=window_days)
@@ -1430,9 +1397,9 @@ with tab_ctx:
                     start_dt = datetime.combine(query_start_date, datetime.min.time()).replace(tzinfo=pytz.utc)
                     end_dt = datetime.combine(query_end_date, datetime.max.time()).replace(tzinfo=pytz.utc) if query_end_date else None
 
-                    # Fetch stock, SPY, and sector in parallel-ish
-                    stock_df = proc.get_stocks(ticker_upper, start_date=start_dt, end_date=end_dt)
-                    spy_df, sector_df, _ = proc.get_market_context(ticker_upper, start_date=start_dt, end_date=end_dt)
+                    stock_df = _fetch_stocks_df(ticker_upper, start_date=start_dt, end_date=end_dt)
+                    spy_df = _fetch_stocks_df("SPY", start_date=start_dt, end_date=end_dt)
+                    sector_df = _fetch_stocks_df(sector_etf, start_date=start_dt, end_date=end_dt)
 
                     if stock_df.empty:
                         with ctx_container:
@@ -1441,10 +1408,8 @@ with tab_ctx:
                         # Normalise all three to 100 at start for comparison
                         def normalise(df):
                             df = df.reset_index()
-                            df['timestamp'] = pd.to_datetime(df['timestamp'])
-                            df = df.sort_values('timestamp')
-                            if 'symbol' in df.columns:
-                                df = df[['timestamp', 'close']]
+                            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+                            df = df.sort_values('timestamp')[['timestamp', 'close']].copy()
                             first = df['close'].iloc[0]
                             df['indexed'] = (df['close'] / first) * 100
                             return df
@@ -1552,8 +1517,7 @@ with tab_predict:
             else:
                 with st.spinner("Fetching tweets and computing predictions..."):
                     try:
-                        # Fetch tweets
-                        tweets_df = run_async(proc.get_tweets(ceo_handle))
+                        tweets_df = _fetch_tweets_df(ceo_handle)
                         if not tweets_df.empty and "date" in tweets_df.columns:
                             tweets_df = filter_tweets_by_date(tweets_df)
 
@@ -1561,19 +1525,14 @@ with tab_predict:
                             with predict_container:
                                 st.info("No tweets found for this date range.")
                         else:
-                            # Fetch stocks with 30-day lookback so RSI/ATR are valid
                             min_date = tweets_df["date"].min() - timedelta(days=30)
                             max_date = tweets_df["date"].max() + timedelta(days=5)
-                            stocks_df = proc.get_stocks(stock_ticker, start_date=min_date, end_date=max_date)
+                            stocks_df = _fetch_stocks_df(stock_ticker, start_date=min_date, end_date=max_date)
 
                             if not stocks_df.empty:
                                 stocks_df = stocks_df.sort_index()
-                                if isinstance(stocks_df.index, pd.MultiIndex):
-                                    stocks_df["date_only"] = stocks_df.index.get_level_values("timestamp").date
-                                else:
-                                    stocks_df["date_only"] = stocks_df.index.date
+                                stocks_df["date_only"] = stocks_df.index.date
 
-                                # Compute RSI and ATR (same as ingestion)
                                 stocks_df["prev_close"] = stocks_df["close"].shift(1)
                                 stocks_df["tr"] = stocks_df[["high", "low", "prev_close"]].apply(
                                     lambda r: max(r["high"] - r["low"],

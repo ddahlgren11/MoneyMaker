@@ -3,12 +3,12 @@ import time
 import logging
 import pandas as pd
 from datetime import timedelta, datetime, date as date_type
-from typing import List
+from typing import List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
-from sqlalchemy import create_engine, Column, Integer, String, Float
+from sqlalchemy import create_engine, Column, Integer, String, Float, func, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
@@ -17,7 +17,8 @@ import yfinance as yf
 # Import the logic from your new files
 from processor import DataProcessor
 from classifier import get_refined_sentiment, get_tone_category, get_tweet_type, get_sentiment_score
-from context import get_news_for_date, get_earnings_dates, build_news_sentiment_lookup  # get_news_for_date used in /api/merged
+from context import get_news_for_date, get_earnings_dates, build_news_sentiment_lookup
+from model.predict import predict_tweets
 
 load_dotenv()
 
@@ -221,36 +222,6 @@ async def process_and_save_all(db: Session = Depends(get_db)):
     }
 
     # Company names for news queries
-    ticker_company = {
-        "TSLA": "Tesla",
-        "AAPL": "Apple",
-        "MSFT": "Microsoft",
-        "GOOGL": "Google",
-        "DELL": "Dell",
-        "AMD": "AMD Advanced Micro Devices",
-        "AMZN": "Amazon",
-        "ABNB": "Airbnb",
-        "UBER": "Uber",
-        "DIS": "Disney",
-        "CRM": "Salesforce",
-        "NVDA": "NVIDIA",
-        "SQ": "Block",
-        "SHOP": "Shopify",
-        "COIN": "Coinbase",
-        "ZM": "Zoom",
-        "ARKK": "ARK Innovation ETF",
-        "PLTR": "Palantir",
-        "GM": "General Motors",
-        "F": "Ford Motor",
-        "SOFI": "SoFi Technologies",
-        "NFLX": "Netflix",
-        "INTC": "Intel",
-        "BOX": "Box Inc",
-        "CRWD": "CrowdStrike",
-        "SPOT": "Spotify",
-        "RIVN": "Rivian",
-    }
-
     total_records = 0
 
     try:
@@ -467,7 +438,13 @@ async def api_get_tweets(ceo: str):
 
         tweets_df = tweets_df.sort_values(by='date', ascending=False)
 
-        # Convert timestamp to string for JSON serialization
+        # Add pre-classification so the UI doesn't need classifier imports
+        tweets_df['refined_sentiment'] = tweets_df['sentiment'].apply(get_refined_sentiment)
+        tweets_df['tone_category'] = tweets_df.apply(
+            lambda r: get_tone_category(str(r['text']), float(r['sentiment'])), axis=1
+        )
+        tweets_df['tweet_type'] = tweets_df['text'].apply(get_tweet_type)
+
         if 'date' in tweets_df.columns:
             tweets_df['date'] = tweets_df['date'].astype(str)
 
@@ -476,14 +453,23 @@ async def api_get_tweets(ceo: str):
         return {"status": "error", "message": str(e)}
 
 @app.get("/api/stocks/{ticker}")
-def api_get_stocks(ticker: str):
+def api_get_stocks(
+    ticker: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+):
     try:
-        stocks_df = proc.get_stocks(ticker)
+        from datetime import timezone
+        start_dt = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc) if start_date else None
+        end_dt = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc) if end_date else None
+        stocks_df = proc.get_stocks(ticker, start_date=start_dt, end_date=end_dt)
         if stocks_df.empty:
             return {"status": "success", "data": []}
 
-        # Reset index to make timestamp a column, and convert to string
         stocks_df = stocks_df.reset_index()
+        # Flatten symbol column from MultiIndex reset if present
+        if 'symbol' in stocks_df.columns:
+            stocks_df = stocks_df.drop(columns=['symbol'])
         if 'timestamp' in stocks_df.columns:
             stocks_df['timestamp'] = stocks_df['timestamp'].astype(str)
 
@@ -614,3 +600,286 @@ async def api_get_merged(ceo: str, ticker: str):
         return {"status": "success", "data": merged_data}
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# THREE-TIER API ENDPOINTS
+# ---------------------------------------------------------------------------
+
+# Single source of truth for CEO metadata used by UI dropdowns and analysis.
+CEO_INFO = {
+    "elonmusk":       {"name": "Elon Musk",        "ticker": "TSLA"},
+    "tim_cook":       {"name": "Tim Cook",          "ticker": "AAPL"},
+    "satyanadella":   {"name": "Satya Nadella",     "ticker": "MSFT"},
+    "sundarpichai":   {"name": "Sundar Pichai",     "ticker": "GOOGL"},
+    "MichaelDell":    {"name": "Michael Dell",      "ticker": "DELL"},
+    "LisaSu":         {"name": "Lisa Su",           "ticker": "AMD"},
+    "ajassy":         {"name": "Andy Jassy",        "ticker": "AMZN"},
+    "bchesky":        {"name": "Brian Chesky",      "ticker": "ABNB"},
+    "dkhos":          {"name": "Dara Khosrowshahi", "ticker": "UBER"},
+    "RobertIger":     {"name": "Robert Iger",       "ticker": "DIS"},
+    "Benioff":        {"name": "Marc Benioff",      "ticker": "CRM"},
+    "jack":           {"name": "Jack Dorsey",       "ticker": "SQ"},
+    "tobi":           {"name": "Tobi Lütke",        "ticker": "SHOP"},
+    "brian_armstrong": {"name": "Brian Armstrong",  "ticker": "COIN"},
+    "ericyuan":       {"name": "Eric Yuan",         "ticker": "ZM"},
+    "CathieDWood":    {"name": "Cathie Wood",       "ticker": "ARKK"},
+    "AlexKarp":       {"name": "Alex Karp",         "ticker": "PLTR"},
+    "mtbarra":        {"name": "Mary Barra",        "ticker": "GM"},
+    "JimFarley98":    {"name": "Jim Farley",        "ticker": "F"},
+    "AnthonyNoto":    {"name": "Anthony Noto",      "ticker": "SOFI"},
+    "reedhastings":   {"name": "Reed Hastings",     "ticker": "NFLX"},
+    "PGelsinger":     {"name": "Pat Gelsinger",     "ticker": "INTC"},
+    "levie":          {"name": "Aaron Levie",       "ticker": "BOX"},
+    "george_kurtz":   {"name": "George Kurtz",      "ticker": "CRWD"},
+    "eldsjal":        {"name": "Daniel Ek",         "ticker": "SPOT"},
+    "RJScaringe":     {"name": "RJ Scaringe",       "ticker": "RIVN"},
+}
+
+
+@app.get("/api/ceos")
+def api_get_ceos():
+    """Return full CEO list for UI dropdowns."""
+    return {
+        "status": "success",
+        "data": [
+            {"handle": handle, "name": info["name"], "ticker": info["ticker"]}
+            for handle, info in CEO_INFO.items()
+        ],
+    }
+
+
+@app.get("/api/merged")
+def api_get_merged_db(
+    ceo: Optional[str] = None,
+    ticker: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 2000,
+    db: Session = Depends(get_db),
+):
+    """Read merged records from the DB with optional filters."""
+    q = db.query(MergedRecord)
+    if ceo:
+        q = q.filter(MergedRecord.ceo == ceo)
+    if ticker:
+        q = q.filter(MergedRecord.stock_ticker == ticker)
+    if start_date:
+        q = q.filter(MergedRecord.date >= start_date)
+    if end_date:
+        q = q.filter(MergedRecord.date <= end_date)
+    records = q.order_by(MergedRecord.date.desc()).limit(limit).all()
+    return {
+        "status": "success",
+        "data": [
+            {
+                "id": r.id,
+                "date": r.date,
+                "ceo": r.ceo,
+                "tweet_text": r.tweet_text,
+                "sentiment_score": r.sentiment_score,
+                "refined_sentiment": r.refined_sentiment,
+                "tone_category": r.tone_category,
+                "tweet_type": r.tweet_type,
+                "stock_ticker": r.stock_ticker,
+                "stock_close": r.stock_close,
+                "stock_volume": r.stock_volume,
+                "stock_open_close_diff": r.stock_open_close_diff,
+                "likes": r.likes,
+                "retweet_count": r.retweet_count,
+                "view_count": r.view_count,
+                "reply_count": r.reply_count,
+                "tweet_hour": r.tweet_hour,
+                "is_premarket": r.is_premarket,
+                "next_day_direction": r.next_day_direction,
+                "rsi_at_tweet": r.rsi_at_tweet,
+                "atr_at_tweet": r.atr_at_tweet,
+                "news_sentiment_score": r.news_sentiment_score,
+                "finbert_score": r.finbert_score,
+                "vix_at_tweet": r.vix_at_tweet,
+                "days_to_earnings": r.days_to_earnings,
+            }
+            for r in records
+        ],
+    }
+
+
+@app.get("/api/merged/summary")
+def api_get_merged_summary(db: Session = Depends(get_db)):
+    """High-level stats about what's in the DB."""
+    total = db.query(func.count(MergedRecord.id)).scalar()
+    ceos = sorted(r[0] for r in db.query(MergedRecord.ceo).distinct().all() if r[0])
+    tickers = sorted(r[0] for r in db.query(MergedRecord.stock_ticker).distinct().all() if r[0])
+    date_range = db.query(func.min(MergedRecord.date), func.max(MergedRecord.date)).first()
+    return {
+        "status": "success",
+        "total_records": total,
+        "ceos": ceos,
+        "tickers": tickers,
+        "date_min": date_range[0] if date_range else None,
+        "date_max": date_range[1] if date_range else None,
+    }
+
+
+# --- Predict endpoint ---
+
+class PredictRequest(BaseModel):
+    tweet_text: str
+    ticker: str
+    sentiment_score: Optional[float] = None
+    finbert_score: Optional[float] = None
+    likes: int = 0
+    retweet_count: int = 0
+    view_count: int = 0
+    reply_count: int = 0
+    tweet_hour: int = 12
+    is_premarket: bool = False
+
+
+@app.post("/api/predict")
+def api_predict(req: PredictRequest):
+    """Run the trained model on a single tweet + optional engagement context."""
+    try:
+        sentiment = req.sentiment_score if req.sentiment_score is not None else get_sentiment_score(req.tweet_text)
+        row = {
+            "date": datetime.now(),
+            "text": req.tweet_text,
+            "sentiment": sentiment,
+            "finbert_score": req.finbert_score,
+            "likes": req.likes,
+            "retweet_count": req.retweet_count,
+            "view_count": req.view_count,
+            "reply_count": req.reply_count,
+            "tweet_hour": req.tweet_hour,
+            "is_premarket": int(req.is_premarket),
+        }
+        tweets_df = pd.DataFrame([row])
+        empty_stocks = pd.DataFrame(
+            columns=["date_only", "close", "open", "high", "low", "volume", "rsi_14", "atr_14"]
+        )
+        result_df = predict_tweets(tweets_df, empty_stocks, ticker=req.ticker)
+        if result_df.empty:
+            return {"status": "error", "message": "Model returned no predictions"}
+        first = result_df.iloc[0]
+        return {
+            "status": "success",
+            "data": {
+                "predicted_direction": first["predicted_direction"],
+                "confidence_pct": float(first["confidence_pct"]),
+                "sentiment_score": round(float(sentiment), 4),
+                "ticker": req.ticker,
+            },
+        }
+    except FileNotFoundError as e:
+        return {"status": "error", "message": str(e)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# --- Analysis endpoints ---
+
+
+def _compute_impact(r) -> float:
+    import math
+    sentiment_mag = abs(r.sentiment_score or 0) * 50
+    reach = (r.likes or 0) + 2 * (r.retweet_count or 0) + 0.1 * (r.view_count or 0) + (r.reply_count or 0)
+    engagement = min(math.log1p(reach) / math.log1p(100_000) * 50, 50)
+    return round(sentiment_mag + engagement, 1)
+
+
+@app.get("/api/analysis/price-swing/{ceo}/{ticker}")
+def api_price_swing(ceo: str, ticker: str, db: Session = Depends(get_db)):
+    """Average absolute price swing and next-day direction split for tweet days."""
+    records = db.query(MergedRecord).filter(
+        MergedRecord.ceo == ceo,
+        MergedRecord.stock_ticker == ticker,
+    ).all()
+    if not records:
+        return {"status": "success", "data": None}
+
+    swings = [abs(r.stock_open_close_diff) for r in records if r.stock_open_close_diff is not None]
+    avg_swing = round(sum(swings) / len(swings), 4) if swings else 0.0
+    up = sum(1 for r in records if r.next_day_direction == 1)
+    down = sum(1 for r in records if r.next_day_direction == 0)
+    total_labeled = up + down
+
+    return {
+        "status": "success",
+        "data": {
+            "avg_abs_swing": avg_swing,
+            "total_tweets": len(records),
+            "next_day_up": up,
+            "next_day_down": down,
+            "next_day_up_pct": round(up / total_labeled * 100, 1) if total_labeled else 0,
+        },
+    }
+
+
+@app.get("/api/analysis/tweet-impact/{ceo}/{ticker}")
+def api_tweet_impact(ceo: str, ticker: str, db: Session = Depends(get_db)):
+    """Per-tweet impact scores with next-day direction label."""
+    records = (
+        db.query(MergedRecord)
+        .filter(MergedRecord.ceo == ceo, MergedRecord.stock_ticker == ticker)
+        .order_by(MergedRecord.date.desc())
+        .limit(300)
+        .all()
+    )
+    if not records:
+        return {"status": "success", "data": []}
+
+    data = [
+        {
+            "date": r.date,
+            "tweet_text": r.tweet_text[:140] if r.tweet_text else "",
+            "sentiment_score": r.sentiment_score,
+            "impact_score": _compute_impact(r),
+            "next_day_direction": r.next_day_direction,
+            "likes": r.likes,
+            "retweet_count": r.retweet_count,
+        }
+        for r in records
+    ]
+    return {"status": "success", "data": data}
+
+
+@app.get("/api/analysis/post-tweet-trend/{ceo}/{ticker}")
+def api_post_tweet_trend(ceo: str, ticker: str, db: Session = Depends(get_db)):
+    """Next-day direction distribution bucketed by tweet sentiment."""
+    records = db.query(MergedRecord).filter(
+        MergedRecord.ceo == ceo,
+        MergedRecord.stock_ticker == ticker,
+        MergedRecord.next_day_direction != None,  # noqa: E711
+    ).all()
+
+    if not records:
+        return {"status": "success", "data": {}}
+
+    buckets = {
+        "very_negative": {"label": "< -0.5",       "up": 0, "down": 0},
+        "negative":      {"label": "-0.5 to -0.1",  "up": 0, "down": 0},
+        "neutral":       {"label": "-0.1 to 0.1",   "up": 0, "down": 0},
+        "positive":      {"label": "0.1 to 0.5",    "up": 0, "down": 0},
+        "very_positive": {"label": "> 0.5",         "up": 0, "down": 0},
+    }
+
+    for r in records:
+        s = r.sentiment_score or 0
+        if s < -0.5:
+            key = "very_negative"
+        elif s < -0.1:
+            key = "negative"
+        elif s <= 0.1:
+            key = "neutral"
+        elif s <= 0.5:
+            key = "positive"
+        else:
+            key = "very_positive"
+        buckets[key]["up" if r.next_day_direction == 1 else "down"] += 1
+
+    for b in buckets.values():
+        total = b["up"] + b["down"]
+        b["total"] = total
+        b["up_pct"] = round(b["up"] / total * 100, 1) if total else 0
+
+    return {"status": "success", "data": buckets}
