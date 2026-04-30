@@ -1642,6 +1642,7 @@ with tab_predict:
                 wif_features = pd.DataFrame([{
                     'sentiment_score':      wif_sentiment,
                     'sentiment_magnitude':  abs(wif_sentiment),
+                    'finbert_score':        None,
                     'tweet_length':         wif_length,
                     'word_count':           max(1, wif_length // 6),
                     'log_likes':            float(np.log1p(wif_likes)),
@@ -1737,6 +1738,7 @@ with tab_backtest:
                             feature_rows.append({
                                 'sentiment_score':      sentiment,
                                 'sentiment_magnitude':  abs(sentiment),
+                                'finbert_score':        row.get('finbert_score'),
                                 'tweet_length':         len(text),
                                 'word_count':           len(text.split()),
                                 'log_likes':            float(np.log1p(likes)),
