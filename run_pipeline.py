@@ -27,11 +27,12 @@ args = parser.parse_args()
 PAGES = args.pages
 
 import pandas as pd
-import yfinance as yf
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from targets import HANDLE_TO_TICKER
+from pipeline_utils import build_vix_lookup, days_to_nearest_earnings, shift_weekend_to_monday, compute_technicals
 
 load_dotenv()
 
@@ -76,6 +77,7 @@ class MergedRecord(Base):
     rsi_at_tweet         = Column(Float,   nullable=True)
     atr_at_tweet         = Column(Float,   nullable=True)
     news_sentiment_score = Column(Float,   nullable=True)
+    finbert_score        = Column(Float,   nullable=True)
     vix_at_tweet         = Column(Float,   nullable=True)
     days_to_earnings     = Column(Integer, nullable=True)
 
@@ -103,48 +105,9 @@ proc = DataProcessor()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _build_vix_lookup(start_date, end_date):
-    try:
-        vix = yf.download("^VIX", start=start_date, end=end_date + timedelta(days=1),
-                          auto_adjust=True, progress=False)
-        if vix.empty:
-            return {}
-        if isinstance(vix.columns, pd.MultiIndex):
-            vix.columns = vix.columns.get_level_values(0)
-        return {d.date(): float(v) for d, v in zip(vix.index, vix["Close"])}
-    except Exception:
-        return {}
-
-
-def _days_to_nearest_earnings(target_date, earnings_set):
-    if not earnings_set:
-        return None
-    if isinstance(target_date, datetime):
-        target_date = target_date.date()
-    diffs = [abs((datetime.strptime(d, "%Y-%m-%d").date() - target_date).days)
-             for d in earnings_set]
-    return min(diffs)
-
-
 # ── Pipeline ──────────────────────────────────────────────────────────────────
 
-TARGETS = {
-    "elonmusk":       "TSLA",
-    "tim_cook":       "AAPL",
-    "satyanadella":   "MSFT",
-    "sundarpichai":   "GOOGL",
-    "MichaelDell":    "DELL",
-    "LisaSu":         "AMD",
-    "ajassy":         "AMZN",
-    "bchesky":        "ABNB",
-    "dkhos":          "UBER",
-    "RobertIger":     "DIS",
-    "Benioff":        "CRM",
-    "jensenhuang":    "NVDA",
-    "jack":           "SQ",
-    "tobi":           "SHOP",
-    "brian_armstrong": "COIN",
-}
+TARGETS = HANDLE_TO_TICKER
 
 
 async def run():
@@ -188,30 +151,12 @@ async def run():
 
             print(f"  {len(tweets_df)} new tweets (skipped {len(existing_dates)} already stored)")
 
-            min_date    = tweets_df["date"].min() - timedelta(days=30)
-            max_date    = tweets_df["date"].max() + timedelta(days=5)
-            vix_lookup  = _build_vix_lookup(min_date, max_date)
+            min_date     = tweets_df["date"].min() - timedelta(days=30)
+            max_date     = tweets_df["date"].max() + timedelta(days=5)
+            vix_lookup   = build_vix_lookup(min_date, max_date)
             earnings_set = get_earnings_dates(ticker)
-            stocks_df   = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
-
-            if not stocks_df.empty:
-                stocks_df = stocks_df.sort_index()
-                stocks_df["date_only"] = (
-                    stocks_df.index.get_level_values("timestamp").date
-                    if isinstance(stocks_df.index, pd.MultiIndex)
-                    else stocks_df.index.date
-                )
-                stocks_df["prev_close"] = stocks_df["close"].shift(1)
-                stocks_df["tr"] = stocks_df[["high", "low", "prev_close"]].apply(
-                    lambda r: max(r["high"] - r["low"],
-                                  abs(r["high"] - r["prev_close"]),
-                                  abs(r["low"]  - r["prev_close"])), axis=1
-                )
-                stocks_df["atr_14"] = stocks_df["tr"].rolling(14).mean()
-                delta = stocks_df["close"].diff()
-                gain  = delta.where(delta > 0, 0.0).rolling(14).mean()
-                loss  = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-                stocks_df["rsi_14"] = 100 - (100 / (1 + gain / loss))
+            stocks_df    = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
+            stocks_df    = compute_technicals(stocks_df)
 
             # News sentiment — load cache, fetch only uncached tweet dates.
             tweet_date_objects = set(tweets_df["date"].dt.date)
@@ -251,11 +196,7 @@ async def run():
                 text       = str(row["text"])
                 tweet_date = row["date"]
 
-                target_date = tweet_date
-                if target_date.weekday() == 5:
-                    target_date += timedelta(days=2)
-                elif target_date.weekday() == 6:
-                    target_date += timedelta(days=1)
+                target_date = shift_weekend_to_monday(tweet_date)
                 target_date_only = target_date.date()
 
                 stock_close = stock_volume = stock_open_close_diff = 0.0
@@ -305,8 +246,9 @@ async def run():
                     rsi_at_tweet=rsi_at_tweet,
                     atr_at_tweet=atr_at_tweet,
                     news_sentiment_score=news_lookup.get(target_date_only.isoformat()),
+                    finbert_score=float(row.get("finbert_score")) if row.get("finbert_score") is not None else None,
                     vix_at_tweet=vix_at_tweet,
-                    days_to_earnings=_days_to_nearest_earnings(target_date_only, earnings_set),
+                    days_to_earnings=days_to_nearest_earnings(target_date_only, earnings_set),
                 ))
                 ticker_records += 1
 

@@ -12,45 +12,18 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, func, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from pydantic import BaseModel
-import yfinance as yf
-
 # Import the logic from your new files
 from processor import DataProcessor
 from classifier import get_refined_sentiment, get_tone_category, get_tweet_type, get_sentiment_score
 from context import get_news_for_date, get_earnings_dates, build_news_sentiment_lookup
 from model.predict import predict_tweets
+from targets import CEO_TARGETS, HANDLE_TO_TICKER
+from pipeline_utils import build_vix_lookup, days_to_nearest_earnings, shift_weekend_to_monday, compute_technicals
 
 load_dotenv()
 
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("context").setLevel(logging.DEBUG)
-
-# --- HELPERS ---
-
-def _build_vix_lookup(start_date, end_date):
-    """Returns a dict of {date: vix_close} for the given range, or {} on failure."""
-    try:
-        vix = yf.download("^VIX", start=start_date, end=end_date + timedelta(days=1),
-                          auto_adjust=True, progress=False)
-        if vix.empty:
-            return {}
-        # Flatten MultiIndex columns if present
-        if isinstance(vix.columns, pd.MultiIndex):
-            vix.columns = vix.columns.get_level_values(0)
-        return {d.date(): float(v) for d, v in zip(vix.index, vix["Close"])}
-    except Exception:
-        return {}
-
-
-def _days_to_nearest_earnings(target_date, earnings_set):
-    """Returns calendar days to the nearest earnings date, or None if unknown."""
-    if not earnings_set:
-        return None
-    if isinstance(target_date, datetime):
-        target_date = target_date.date()
-    diffs = [abs((datetime.strptime(d, "%Y-%m-%d").date() - target_date).days)
-             for d in earnings_set]
-    return min(diffs)
 
 
 # --- DATABASE SETUP ---
@@ -189,46 +162,10 @@ async def process_and_save_all(db: Session = Depends(get_db)):
     Fetches data for multiple CEOs, classifies it, and saves it to Neon.
     This replaces the manual looping previously done in Colab.
     """
-    # Map of CEO usernames to their respective Stock Tickers
-    targets = {
-        "elonmusk":       "TSLA",
-        "tim_cook":       "AAPL",
-        "satyanadella":   "MSFT",
-        "sundarpichai":   "GOOGL",
-        "MichaelDell":    "DELL",
-        "LisaSu":         "AMD",
-        "ajassy":         "AMZN",
-        "bchesky":        "ABNB",
-        "dkhos":          "UBER",
-        "RobertIger":     "DIS",
-        "Benioff":        "CRM",
-        # "jensenhuang": "NVDA",  # account inactive — only 7 tweets fetched
-        "jack":           "SQ",
-        "tobi":           "SHOP",
-        "brian_armstrong": "COIN",
-        # Extended CEO set
-        "ericyuan":       "ZM",    # Eric Yuan, Zoom CEO
-        "CathieDWood":    "ARKK",  # Cathie Wood, ARK Invest
-        "AlexKarp":       "PLTR",  # Alex Karp, Palantir CEO
-        "mtbarra":        "GM",    # Mary Barra, GM CEO
-        "JimFarley98":    "F",     # Jim Farley, Ford CEO
-        "AnthonyNoto":    "SOFI",  # Anthony Noto, SoFi CEO
-        "reedhastings":   "NFLX",  # Reed Hastings, Netflix co-founder/ex-CEO
-        "PGelsinger":     "INTC",  # Pat Gelsinger, Intel ex-CEO
-        "levie":          "BOX",   # Aaron Levie, Box CEO
-        "george_kurtz":   "CRWD",  # George Kurtz, CrowdStrike CEO
-        "eldsjal":        "SPOT",  # Daniel Ek, Spotify CEO
-        "RJScaringe":     "RIVN",  # RJ Scaringe, Rivian CEO
-    }
-
-    # Company names for news queries
+    targets = HANDLE_TO_TICKER
     total_records = 0
 
     try:
-        # Clear existing records so re-runs don't create duplicates
-        db.query(MergedRecord).delete()
-        db.flush()
-
         skipped = []
         for username, ticker in targets.items():
             # 1. Fetch Tweets using processor logic
@@ -245,12 +182,23 @@ async def process_and_save_all(db: Session = Depends(get_db)):
             if tweets_df.empty:
                 continue
 
+            # Skip tweets already stored for this CEO
+            existing_dates = {
+                r.date for r in
+                db.query(MergedRecord.date).filter(MergedRecord.ceo == username).all()
+            }
+            tweets_df = tweets_df[
+                ~tweets_df['date'].apply(lambda d: d.isoformat()).isin(existing_dates)
+            ]
+            if tweets_df.empty:
+                continue
+
             # Extra 30-day lookback so RSI/ATR rolling windows are valid from the first tweet
             min_date = tweets_df['date'].min() - timedelta(days=30)
             max_date = tweets_df['date'].max() + timedelta(days=5)
 
             # 2a. Fetch VIX for this date range (market fear context)
-            vix_lookup = _build_vix_lookup(min_date, max_date)
+            vix_lookup = build_vix_lookup(min_date, max_date)
 
             # 2b. Fetch earnings dates for this ticker
             earnings_set = get_earnings_dates(ticker)
@@ -258,28 +206,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
             # 2c. Fetch Stock Data for the associated ticker
             stocks_df = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
 
-            if not stocks_df.empty:
-                stocks_df = stocks_df.sort_index()
-                if isinstance(stocks_df.index, pd.MultiIndex):
-                    stock_dates = stocks_df.index.get_level_values('timestamp').date
-                else:
-                    stock_dates = stocks_df.index.date
-                stocks_df['date_only'] = stock_dates
-
-                # ATR (14-period)
-                stocks_df['prev_close'] = stocks_df['close'].shift(1)
-                stocks_df['tr'] = stocks_df[['high', 'low', 'prev_close']].apply(
-                    lambda r: max(r['high'] - r['low'],
-                                  abs(r['high'] - r['prev_close']),
-                                  abs(r['low'] - r['prev_close'])), axis=1
-                )
-                stocks_df['atr_14'] = stocks_df['tr'].rolling(14).mean()
-
-                # RSI (14-period)
-                delta = stocks_df['close'].diff()
-                gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-                loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-                stocks_df['rsi_14'] = 100 - (100 / (1 + gain / loss))
+            stocks_df = compute_technicals(stocks_df)
 
             # 2d. Build news sentiment lookup — one AV call per ticker (sort=EARLIEST),
             # cached to DB so re-runs don't burn the 25 req/day limit.
@@ -328,13 +255,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                 text = str(row['text'])
                 tweet_date = row['date']
 
-                # Match weekend tweets to following Monday
-                target_date = tweet_date
-                if target_date.weekday() == 5:  # Saturday
-                    target_date += timedelta(days=2)
-                elif target_date.weekday() == 6:  # Sunday
-                    target_date += timedelta(days=1)
-
+                target_date = shift_weekend_to_monday(tweet_date)
                 target_date_only = target_date.date()
 
                 stock_close = 0.0
@@ -370,7 +291,7 @@ async def process_and_save_all(db: Session = Depends(get_db)):
                             break
 
                 # Days to nearest earnings date
-                days_to_earnings = _days_to_nearest_earnings(target_date_only, earnings_set)
+                days_to_earnings = days_to_nearest_earnings(target_date_only, earnings_set)
 
                 new_record = MergedRecord(
                     date=tweet_date.isoformat(),
@@ -497,33 +418,7 @@ async def api_get_merged(ceo: str, ticker: str):
         # 2. Fetch Stock Data
         stocks_df = proc.get_stocks(ticker, start_date=min_date, end_date=max_date)
 
-        if not stocks_df.empty:
-            stocks_df = stocks_df.sort_index()
-            if isinstance(stocks_df.index, pd.MultiIndex):
-                stock_dates = stocks_df.index.get_level_values('timestamp').date
-            else:
-                stock_dates = stocks_df.index.date
-            stocks_df['date_only'] = stock_dates
-
-            # ATR (14-period)
-            stocks_df['prev_close'] = stocks_df['close'].shift(1)
-            stocks_df['tr'] = stocks_df[['high', 'low', 'prev_close']].apply(
-                lambda r: max(r['high'] - r['low'],
-                              abs(r['high'] - r['prev_close']),
-                              abs(r['low'] - r['prev_close'])), axis=1
-            )
-            stocks_df['atr_14'] = stocks_df['tr'].rolling(14).mean()
-
-            # RSI (14-period)
-            delta = stocks_df['close'].diff()
-            gain = delta.where(delta > 0, 0.0).rolling(14).mean()
-            loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-            stocks_df['rsi_14'] = 100 - (100 / (1 + gain / loss))
-
-        ticker_company = {
-            "TSLA": "Tesla", "AAPL": "Apple", "MSFT": "Microsoft",
-            "GOOGL": "Google", "DELL": "Dell",
-        }
+        stocks_df = compute_technicals(stocks_df)
         news_cache = {}
         merged_data = []
 
@@ -533,13 +428,7 @@ async def api_get_merged(ceo: str, ticker: str):
             text = str(row['text'])
             tweet_date = row['date']
 
-            # Match weekend tweets to following Monday
-            target_date = tweet_date
-            if target_date.weekday() == 5:  # Saturday
-                target_date += timedelta(days=2)
-            elif target_date.weekday() == 6:  # Sunday
-                target_date += timedelta(days=1)
-
+            target_date = shift_weekend_to_monday(tweet_date)
             target_date_only = target_date.date()
 
             stock_close = None
@@ -565,7 +454,7 @@ async def api_get_merged(ceo: str, ticker: str):
 
             news_key = (ticker, target_date_only.isoformat())
             if news_key not in news_cache:
-                company = ticker_company.get(ticker.upper(), ticker)
+                company = next((v["name"] for v in CEO_TARGETS.values() if v["ticker"] == ticker.upper()), ticker)
                 articles = get_news_for_date(ticker, company, target_date_only)
                 if articles:
                     scores = [get_sentiment_score(a['title']) for a in articles]
@@ -606,35 +495,7 @@ async def api_get_merged(ceo: str, ticker: str):
 # THREE-TIER API ENDPOINTS
 # ---------------------------------------------------------------------------
 
-# Single source of truth for CEO metadata used by UI dropdowns and analysis.
-CEO_INFO = {
-    "elonmusk":       {"name": "Elon Musk",        "ticker": "TSLA"},
-    "tim_cook":       {"name": "Tim Cook",          "ticker": "AAPL"},
-    "satyanadella":   {"name": "Satya Nadella",     "ticker": "MSFT"},
-    "sundarpichai":   {"name": "Sundar Pichai",     "ticker": "GOOGL"},
-    "MichaelDell":    {"name": "Michael Dell",      "ticker": "DELL"},
-    "LisaSu":         {"name": "Lisa Su",           "ticker": "AMD"},
-    "ajassy":         {"name": "Andy Jassy",        "ticker": "AMZN"},
-    "bchesky":        {"name": "Brian Chesky",      "ticker": "ABNB"},
-    "dkhos":          {"name": "Dara Khosrowshahi", "ticker": "UBER"},
-    "RobertIger":     {"name": "Robert Iger",       "ticker": "DIS"},
-    "Benioff":        {"name": "Marc Benioff",      "ticker": "CRM"},
-    "jack":           {"name": "Jack Dorsey",       "ticker": "SQ"},
-    "tobi":           {"name": "Tobi Lütke",        "ticker": "SHOP"},
-    "brian_armstrong": {"name": "Brian Armstrong",  "ticker": "COIN"},
-    "ericyuan":       {"name": "Eric Yuan",         "ticker": "ZM"},
-    "CathieDWood":    {"name": "Cathie Wood",       "ticker": "ARKK"},
-    "AlexKarp":       {"name": "Alex Karp",         "ticker": "PLTR"},
-    "mtbarra":        {"name": "Mary Barra",        "ticker": "GM"},
-    "JimFarley98":    {"name": "Jim Farley",        "ticker": "F"},
-    "AnthonyNoto":    {"name": "Anthony Noto",      "ticker": "SOFI"},
-    "reedhastings":   {"name": "Reed Hastings",     "ticker": "NFLX"},
-    "PGelsinger":     {"name": "Pat Gelsinger",     "ticker": "INTC"},
-    "levie":          {"name": "Aaron Levie",       "ticker": "BOX"},
-    "george_kurtz":   {"name": "George Kurtz",      "ticker": "CRWD"},
-    "eldsjal":        {"name": "Daniel Ek",         "ticker": "SPOT"},
-    "RJScaringe":     {"name": "RJ Scaringe",       "ticker": "RIVN"},
-}
+CEO_INFO = CEO_TARGETS
 
 
 @app.get("/api/ceos")

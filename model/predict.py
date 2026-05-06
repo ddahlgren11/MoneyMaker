@@ -16,6 +16,7 @@ import yfinance as yf
 from datetime import timedelta, datetime
 from classifier import get_refined_sentiment, get_tone_category, get_tweet_type, get_finbert_score
 from context import get_earnings_dates
+from pipeline_utils import shift_weekend_to_monday
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "trained_model.pkl")
 
@@ -67,13 +68,7 @@ def _build_feature_row(tweet_row, stocks_df, ticker=None):
     """Builds one feature dict for a single tweet row."""
     tweet_date = tweet_row["date"]
 
-    # Match weekend tweets to the following Monday (same logic as ingestion)
-    target_date = tweet_date
-    if hasattr(target_date, "weekday"):
-        if target_date.weekday() == 5:
-            target_date += timedelta(days=2)
-        elif target_date.weekday() == 6:
-            target_date += timedelta(days=1)
+    target_date = shift_weekend_to_monday(tweet_date)
 
     target_date_only = target_date.date() if hasattr(target_date, "date") else target_date
 

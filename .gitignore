@@ -1,3 +1,7 @@
 .env
 __pycache__/
 test.db
+session.tw_session
+cookies.json
+streamlit.log
+*.log
