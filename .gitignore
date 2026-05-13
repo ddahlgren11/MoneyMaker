@@ -5,3 +5,4 @@ session.tw_session
 cookies.json
 streamlit.log
 *.log
+.streamlit/secrets.toml

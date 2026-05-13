@@ -1,10 +1,11 @@
 import os
-import requests
+import yfinance as yf
+import psycopg2
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, date as date_type
 import pytz
 import traceback
 
@@ -14,53 +15,85 @@ from classifier import get_refined_sentiment, get_tone_category, get_tweet_type
 from context import get_earnings_dates, get_news_for_range, get_sector_etf
 
 # ---------------------------------------------------------------------------
-# API CLIENT HELPERS
+# DATABASE HELPERS
 # ---------------------------------------------------------------------------
-_API_BASE = os.getenv("API_BASE_URL", "http://localhost:8000")
 
-def api_get(path, params=None, timeout=120):
+def _get_db_url():
     try:
-        r = requests.get(f"{_API_BASE}{path}", params=params, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as exc:
-        return {"status": "error", "message": str(exc), "data": []}
+        return st.secrets["DATABASE_URL"]
+    except Exception:
+        return os.getenv("DATABASE_URL", "")
 
-def api_post(path, data=None, timeout=300):
+@st.cache_data(ttl=300)
+def _query_merged(ceo=None, ticker=None, start_date=None, end_date=None, limit=5000):
+    url = _get_db_url()
+    if not url:
+        return pd.DataFrame()
     try:
-        r = requests.post(f"{_API_BASE}{path}", json=data, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
-    except Exception as exc:
-        return {"status": "error", "message": str(exc)}
-
-def _fetch_tweets_df(ceo_handle):
-    """Call /api/tweets/{ceo} and return a DataFrame (empty on error)."""
-    resp = api_get(f"/api/tweets/{ceo_handle}", timeout=180)
-    if resp.get("status") != "success" or not resp.get("data"):
-        return pd.DataFrame()
-    df = pd.DataFrame(resp["data"])
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"], utc=True)
-    return df
-
-def _fetch_stocks_df(ticker, start_date=None, end_date=None):
-    """Call /api/stocks/{ticker} and return a DataFrame indexed by timestamp."""
-    params = {}
-    if start_date:
-        params["start_date"] = start_date.isoformat() if hasattr(start_date, "isoformat") else str(start_date)
-    if end_date:
-        params["end_date"] = end_date.isoformat() if hasattr(end_date, "isoformat") else str(end_date)
-    resp = api_get(f"/api/stocks/{ticker}", params=params, timeout=60)
-    if resp.get("status") != "success" or not resp.get("data"):
-        return pd.DataFrame()
-    df = pd.DataFrame(resp["data"])
-    if df.empty:
+        conn = psycopg2.connect(url)
+        conditions, params = [], []
+        if ceo:
+            conditions.append("ceo = %s")
+            params.append(ceo)
+        if ticker:
+            conditions.append("stock_ticker = %s")
+            params.append(ticker)
+        if start_date:
+            conditions.append("date >= %s")
+            params.append(str(start_date)[:10])
+        if end_date:
+            conditions.append("date <= %s")
+            params.append(str(end_date)[:10])
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.append(limit)
+        df = pd.read_sql_query(
+            f"SELECT * FROM merged_data {where} ORDER BY date DESC LIMIT %s",
+            conn, params=params,
+        )
+        conn.close()
         return df
-    if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        df = df.set_index("timestamp").sort_index()
+    except Exception as e:
+        st.error(f"Database error: {e}")
+        return pd.DataFrame()
+
+def _fetch_tweets_df(ceo_handle, start_date=None, end_date=None):
+    df = _query_merged(ceo=ceo_handle, start_date=start_date, end_date=end_date, limit=2000)
+    if df.empty:
+        return pd.DataFrame()
+    df = df.rename(columns={"tweet_text": "text", "sentiment_score": "sentiment"})
+    df["date"] = pd.to_datetime(df["date"], utc=True)
     return df
+
+@st.cache_data(ttl=300)
+def _fetch_stocks_df(ticker, start_date=None, end_date=None):
+    try:
+        def _to_date_str(dt):
+            if dt is None:
+                return None
+            if hasattr(dt, "date"):
+                return str(dt.date())
+            return str(dt)[:10]
+
+        start = _to_date_str(start_date) or "2020-01-01"
+        end_str = _to_date_str(end_date)
+        if end_str:
+            from datetime import date as _d, timedelta as _td
+            end = str(_d.fromisoformat(end_str) + _td(days=1))
+        else:
+            end = None
+
+        df = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False)
+        if df.empty:
+            return pd.DataFrame()
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [str(c[0]).lower() for c in df.columns]
+        else:
+            df.columns = [str(c).lower() for c in df.columns]
+        df.index = pd.to_datetime(df.index, utc=True)
+        df.index.name = "timestamp"
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 st.set_page_config(page_title="MoneyMaker", layout="wide", page_icon="📈")
 
@@ -253,10 +286,7 @@ st.markdown("""
 
 @st.cache_data(ttl=300)
 def load_dashboard_data():
-    resp = api_get("/api/merged", params={"limit": 5000})
-    if resp.get("status") != "success" or not resp.get("data"):
-        return None
-    df = pd.DataFrame(resp["data"])
+    df = _query_merged(limit=5000)
     return df if not df.empty else None
 
 # ── CEO master list (single source of truth for the whole app) ────────────────
@@ -351,7 +381,7 @@ with tab_home:
     if db_data is None:
         # ── Getting started ───────────────────────────────────────────────────
         st.markdown("### Welcome to MoneyMaker")
-        st.markdown("Your database is empty. Run `/process/all` from the FastAPI backend to populate it, or use the tabs below to start exploring manually.")
+        st.markdown("No tweet data found in the database yet.")
         st.markdown("---")
         features = [
             ("Data", "Pull raw tweets, stock prices, and merged data for any CEO and ticker."),
@@ -507,22 +537,19 @@ with tab_data:
         else:
             with st.spinner("Loading merged data from database..."):
                 try:
-                    params = {"ceo": ceo_handle, "ticker": stock_ticker, "limit": 500}
-                    if query_start_date:
-                        params["start_date"] = query_start_date.isoformat()
-                    if query_end_date:
-                        params["end_date"] = query_end_date.isoformat()
-                    resp = api_get("/api/merged", params=params)
-                    if resp.get("status") != "success":
-                        st.error(f"API error: {resp.get('message', 'unknown')}")
-                    else:
-                        merged_df = pd.DataFrame(resp.get("data", []))
-                        with data_results:
-                            st.subheader(f"Merged Data (@{ceo_handle} & {stock_ticker.upper()}) ({date_display})")
-                            if merged_df.empty:
-                                st.info("No merged data found. Run /process/all first to populate the database.")
-                            else:
-                                st.dataframe(merged_df, use_container_width=True)
+                    merged_df = _query_merged(
+                        ceo=ceo_handle,
+                        ticker=stock_ticker,
+                        start_date=query_start_date.isoformat() if query_start_date else None,
+                        end_date=query_end_date.isoformat() if query_end_date else None,
+                        limit=500,
+                    )
+                    with data_results:
+                        st.subheader(f"Merged Data (@{ceo_handle} & {stock_ticker.upper()}) ({date_display})")
+                        if merged_df.empty:
+                            st.info("No merged data found for this selection.")
+                        else:
+                            st.dataframe(merged_df, use_container_width=True)
                 except Exception as e:
                     st.error(f"Failed to fetch merged data: {str(e)}")
 
