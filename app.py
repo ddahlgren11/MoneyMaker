@@ -324,44 +324,55 @@ def compute_impact_score(sentiment, likes=0, retweets=0, views=0, replies=0):
     reach = min(50.0, np.log1p(engagement) / np.log1p(1_000_000) * 50)
     return round(strength + reach, 1)
 
-# ── Shared inputs ─────────────────────────────────────────────────────────────
+# ── Sidebar: project info only ────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("""
-    <div style="padding:0.75rem 0 1rem 0;border-bottom:1px solid #2a3a55;margin-bottom:1rem;">
+    <div style="padding:0.75rem 0 1rem 0;border-bottom:1px solid #2a3a55;margin-bottom:1.25rem;">
         <div style="color:#ff5c5c;font-weight:800;font-size:1.1rem;">MoneyMaker</div>
-        <div style="color:#8a9bbf;font-size:0.78rem;margin-top:0.25rem;">
-            Correlates CEO tweets with stock market movements using NLP &amp; machine learning.
+        <div style="color:#8a9bbf;font-size:0.78rem;margin-top:0.25rem;line-height:1.5;">
+            Tracks CEO tweets and correlates them with real stock market movements.
+            Built with Python, NLP, and a trained machine learning model.
         </div>
     </div>
+    <div style="color:#8a9bbf;font-size:0.75rem;margin-bottom:0.5rem;">Built by Dillon Dahlgren</div>
+    <a href="https://github.com/ddahlgren11/MoneyMaker" target="_blank"
+       style="color:#ff5c5c;font-size:0.75rem;text-decoration:none;">View on GitHub →</a>
     """, unsafe_allow_html=True)
 
+    st.markdown("")
+    if st.button("How does this work?", use_container_width=True):
+        st.session_state['intro_dismissed'] = False
+        st.rerun()
+
+# ── Persistent top control bar ────────────────────────────────────────────────
+st.markdown("""
+<div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:10px;
+            padding:0.75rem 1.25rem 0.25rem;margin-bottom:1rem;">
+""", unsafe_allow_html=True)
+
+_ctrl1, _ctrl2, _ctrl3, _ctrl4 = st.columns([3, 1.2, 1.5, 1.5])
+
+with _ctrl1:
     _sorted_ceos = sorted(CEO_DATA.items(), key=lambda x: x[1]['name'])
-    _ceo_labels = [f"{v['name']}  (@{k})  —  {v['ticker']}" for k, v in _sorted_ceos]
+    _ceo_labels = [f"{v['name']}  —  {v['ticker']}" for k, v in _sorted_ceos]
     _default_idx = next((i for i, (k, _) in enumerate(_sorted_ceos) if k == "elonmusk"), 0)
-    _sel = st.selectbox("Select CEO", _ceo_labels, index=_default_idx, key="ceo_selector")
+    _sel_idx = st.selectbox("CEO", _ceo_labels, index=_default_idx, key="ceo_selector")
+    ceo_handle = _sorted_ceos[_ceo_labels.index(_sel_idx)][0]
 
-    ceo_handle = _sel.split("(@")[1].split(")")[0]
+with _ctrl2:
     _auto_ticker = CEO_DATA[ceo_handle]["ticker"]
-    if st.session_state.get("_last_ceo_sel") != _sel:
+    if st.session_state.get("_last_ceo") != ceo_handle:
         st.session_state["ticker_override"] = _auto_ticker
-        st.session_state["_last_ceo_sel"] = _sel
+        st.session_state["_last_ceo"] = ceo_handle
+    stock_ticker = st.text_input("Ticker", key="ticker_override", placeholder="TSLA")
 
-    stock_ticker = st.text_input("Stock Ticker", key="ticker_override", placeholder="e.g. TSLA")
+with _ctrl3:
     query_start_date = st.date_input("From", value=datetime.now(pytz.utc).date() - timedelta(days=90))
-    query_end_date = st.date_input("To (optional)", value=None)
 
-    st.markdown("""
-    <div style="margin-top:2rem;padding-top:1rem;border-top:1px solid #2a3a55;">
-        <div style="color:#8a9bbf;font-size:0.75rem;">Built by Dillon Dahlgren</div>
-        <a href="https://github.com/ddahlgren11/MoneyMaker" target="_blank"
-           style="color:#ff5c5c;font-size:0.75rem;text-decoration:none;">View on GitHub →</a>
-    </div>
-    """, unsafe_allow_html=True)
+with _ctrl4:
+    query_end_date = st.date_input("To", value=None)
 
-    if st.session_state.get('intro_dismissed'):
-        if st.button("How does this work?", use_container_width=True):
-            st.session_state['intro_dismissed'] = False
-            st.rerun()
+st.markdown("</div>", unsafe_allow_html=True)
 
 if query_end_date:
     date_display = f"{query_start_date.strftime('%Y-%m-%d')} to {query_end_date.strftime('%Y-%m-%d')}"
@@ -636,23 +647,39 @@ with tab_explore:
 
     st.markdown("---")
 
-    # ── Raw database view ──────────────────────────────────────────────────────
-    with st.expander("View full dataset (all features stored per tweet)"):
-        if not stock_ticker:
-            st.info("Enter a stock ticker in the sidebar to load the full dataset.")
+    # ── Tweet + Stock combined view ────────────────────────────────────────────
+    st.markdown("### Tweet & Stock Data")
+    st.caption("Every tweet paired with the stock price on that day — sentiment score, tone, and market reaction side by side.")
+
+    _raw_df = _query_merged(
+        ceo=ceo_handle,
+        ticker=stock_ticker or CEO_DATA[ceo_handle]["ticker"],
+        start_date=query_start_date.isoformat() if query_start_date else None,
+        end_date=query_end_date.isoformat() if query_end_date else None,
+        limit=500,
+    )
+    if _raw_df.empty:
+        st.info("No records found for this selection — try a different CEO or date range.")
+    else:
+        _nice_cols = {
+            'date': 'Date', 'tweet_text': 'Tweet', 'sentiment_score': 'Sentiment',
+            'refined_sentiment': 'Mood', 'tone_category': 'Tone', 'tweet_type': 'Type',
+            'stock_ticker': 'Ticker', 'stock_close': 'Close ($)',
+            'stock_open_close_diff': 'Day Move ($)', 'stock_volume': 'Volume',
+        }
+        _display_cols = [c for c in _nice_cols if c in _raw_df.columns]
+        st.dataframe(
+            _raw_df[_display_cols].rename(columns=_nice_cols),
+            use_container_width=True, height=360,
+        )
+        st.caption(f"{len(_raw_df)} records · sentiment scored with VADER NLP · stock data via yfinance")
+
+    with st.expander("Show all stored features (RSI, ATR, VIX, FinBERT, earnings dates…)"):
+        if _raw_df.empty:
+            st.info("No records loaded above.")
         else:
-            _raw_df = _query_merged(
-                ceo=ceo_handle,
-                ticker=stock_ticker,
-                start_date=query_start_date.isoformat() if query_start_date else None,
-                end_date=query_end_date.isoformat() if query_end_date else None,
-                limit=500,
-            )
-            if _raw_df.empty:
-                st.info("No records found for this selection.")
-            else:
-                st.dataframe(_raw_df, use_container_width=True)
-                st.caption(f"{len(_raw_df)} records · includes sentiment, engagement, RSI, ATR, VIX, FinBERT score, news sentiment, days to earnings")
+            st.dataframe(_raw_df, use_container_width=True)
+            st.caption(f"{len(_raw_df)} records · full feature set used by the ML model")
 
 # ── ANALYSIS TAB: Price Swing ─────────────────────────────────────────────────
 with tab_analysis:
