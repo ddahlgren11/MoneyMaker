@@ -274,6 +274,12 @@ h2, h3 {
 .stSpinner > div {
     border-top-color: #ff5c5c !important;
 }
+
+/* ── Hide sidebar completely ── */
+[data-testid="stSidebar"],
+[data-testid="collapsedControl"] {
+    display: none !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -324,25 +330,82 @@ def compute_impact_score(sentiment, likes=0, retweets=0, views=0, replies=0):
     reach = min(50.0, np.log1p(engagement) / np.log1p(1_000_000) * 50)
     return round(strength + reach, 1)
 
-# ── Sidebar: project info only ────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("""
-    <div style="padding:0.75rem 0 1rem 0;border-bottom:1px solid #2a3a55;margin-bottom:1.25rem;">
-        <div style="color:#ff5c5c;font-weight:800;font-size:1.1rem;">MoneyMaker</div>
-        <div style="color:#8a9bbf;font-size:0.78rem;margin-top:0.25rem;line-height:1.5;">
-            Tracks CEO tweets and correlates them with real stock market movements.
-            Built with Python, NLP, and a trained machine learning model.
-        </div>
-    </div>
-    <div style="color:#8a9bbf;font-size:0.75rem;margin-bottom:0.5rem;">Built by Dillon Dahlgren</div>
-    <a href="https://github.com/ddahlgren11/MoneyMaker" target="_blank"
-       style="color:#ff5c5c;font-size:0.75rem;text-decoration:none;">View on GitHub →</a>
-    """, unsafe_allow_html=True)
+# ── First-visit infographic (blocks entire page until dismissed) ──────────────
+if not st.session_state.get('intro_dismissed'):
+    st.html("""
+    <div style="max-width:820px;margin:0 auto;">
 
-    st.markdown("")
-    if st.button("How does this work?", use_container_width=True):
-        st.session_state['intro_dismissed'] = False
-        st.rerun()
+      <div style="text-align:center;padding:2rem 0 1.5rem;">
+        <div style="font-size:2.8rem;font-weight:900;
+                    background:linear-gradient(90deg,#ff5c5c,#ff8c5c);
+                    -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
+          MoneyMaker
+        </div>
+        <div style="color:#c0cfe8;font-size:1.15rem;margin-top:0.5rem;font-weight:400;">
+          Do CEO tweets move stock prices?
+        </div>
+        <div style="color:#8a9bbf;font-size:0.9rem;margin-top:0.4rem;">
+          We collected thousands of real tweets, read the mood of each one,
+          and checked what happened to the stock the next day.
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;margin:1.5rem 0;">
+
+        <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:14px;padding:1.5rem;text-align:center;">
+          <div style="font-size:2.2rem;margin-bottom:0.75rem;">🐦</div>
+          <div style="color:#ff5c5c;font-weight:700;font-size:0.95rem;margin-bottom:0.5rem;">Step 1 — Capture</div>
+          <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+            We track tweets from 24 high-profile CEOs — people like Elon Musk,
+            Tim Cook, and Satya Nadella. Every tweet gets a mood score from
+            <b>−1 (very negative)</b> to <b>+1 (very positive)</b>.
+          </div>
+        </div>
+
+        <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:14px;padding:1.5rem;text-align:center;">
+          <div style="font-size:2.2rem;margin-bottom:0.75rem;">📈</div>
+          <div style="color:#ff5c5c;font-weight:700;font-size:0.95rem;margin-bottom:0.5rem;">Step 2 — Compare</div>
+          <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+            We pull the real closing price of the CEO's company stock for that day
+            and the day after. Did the stock go <b style="color:#26a69a;">up</b> or
+            <b style="color:#ef5350;">down</b> after the tweet? We record both.
+          </div>
+        </div>
+
+        <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:14px;padding:1.5rem;text-align:center;">
+          <div style="font-size:2.2rem;margin-bottom:0.75rem;">🤖</div>
+          <div style="color:#ff5c5c;font-weight:700;font-size:0.95rem;margin-bottom:0.5rem;">Step 3 — Predict</div>
+          <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+            A machine learning model learns the pattern from thousands of past
+            tweet–stock pairs. Given a new tweet, it predicts whether the stock
+            will go <b style="color:#26a69a;">up</b> or <b style="color:#ef5350;">down</b> tomorrow.
+          </div>
+        </div>
+
+      </div>
+
+      <div style="background:#1a2235;border:1px solid #2a3a55;border-radius:10px;
+                  padding:1rem 1.5rem;margin-bottom:1.5rem;display:flex;
+                  align-items:center;gap:1rem;flex-wrap:wrap;">
+        <div style="font-size:1.4rem;">💡</div>
+        <div style="color:#8a9bbf;font-size:0.85rem;line-height:1.6;flex:1;">
+          <b style="color:#c0cfe8;">What you can do here:</b>
+          Browse the tweet feed and filter by mood in <b style="color:#ff5c5c;">Explore</b>,
+          run charts to see price swings after tweets in <b style="color:#ff5c5c;">Analysis</b>,
+          and test the prediction model live in <b style="color:#ff5c5c;">Predict</b>.
+          No finance knowledge needed.
+        </div>
+      </div>
+
+    </div>
+    """)
+
+    col_btn, _ = st.columns([1, 3])
+    with col_btn:
+        if st.button("Explore the data →", type="primary", use_container_width=True):
+            st.session_state['intro_dismissed'] = True
+            st.rerun()
+    st.stop()
 
 # ── Persistent top control bar ────────────────────────────────────────────────
 st.markdown("""
@@ -403,82 +466,11 @@ tab_home, tab_explore, tab_analysis, tab_predict, tab_backtest = st.tabs([
 
 # ── OVERVIEW TAB ──────────────────────────────────────────────────────────────
 with tab_home:
-    # ── Welcome infographic (first visit only) ────────────────────────────────
-    if not st.session_state.get('intro_dismissed'):
-        st.html("""
-        <div style="max-width:820px;margin:0 auto;">
-
-          <div style="text-align:center;padding:2rem 0 1.5rem;">
-            <div style="font-size:2.8rem;font-weight:900;
-                        background:linear-gradient(90deg,#ff5c5c,#ff8c5c);
-                        -webkit-background-clip:text;-webkit-text-fill-color:transparent;">
-              MoneyMaker
-            </div>
-            <div style="color:#c0cfe8;font-size:1.15rem;margin-top:0.5rem;font-weight:400;">
-              Do CEO tweets move stock prices?
-            </div>
-            <div style="color:#8a9bbf;font-size:0.9rem;margin-top:0.4rem;">
-              We collected thousands of real tweets, read the mood of each one,
-              and checked what happened to the stock the next day.
-            </div>
-          </div>
-
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;margin:1.5rem 0;">
-
-            <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:14px;padding:1.5rem;text-align:center;">
-              <div style="font-size:2.2rem;margin-bottom:0.75rem;">🐦</div>
-              <div style="color:#ff5c5c;font-weight:700;font-size:0.95rem;margin-bottom:0.5rem;">Step 1 — Capture</div>
-              <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
-                We track tweets from 24 high-profile CEOs — people like Elon Musk,
-                Tim Cook, and Satya Nadella. Every tweet gets a mood score from
-                <b>−1 (very negative)</b> to <b>+1 (very positive)</b>.
-              </div>
-            </div>
-
-            <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:14px;padding:1.5rem;text-align:center;">
-              <div style="font-size:2.2rem;margin-bottom:0.75rem;">📈</div>
-              <div style="color:#ff5c5c;font-weight:700;font-size:0.95rem;margin-bottom:0.5rem;">Step 2 — Compare</div>
-              <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
-                We pull the real closing price of the CEO's company stock for that day
-                and the day after. Did the stock go <b style="color:#26a69a;">up</b> or
-                <b style="color:#ef5350;">down</b> after the tweet? We record both.
-              </div>
-            </div>
-
-            <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:14px;padding:1.5rem;text-align:center;">
-              <div style="font-size:2.2rem;margin-bottom:0.75rem;">🤖</div>
-              <div style="color:#ff5c5c;font-weight:700;font-size:0.95rem;margin-bottom:0.5rem;">Step 3 — Predict</div>
-              <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
-                A machine learning model learns the pattern from thousands of past
-                tweet–stock pairs. Given a new tweet, it predicts whether the stock
-                will go <b style="color:#26a69a;">up</b> or <b style="color:#ef5350;">down</b> tomorrow.
-              </div>
-            </div>
-
-          </div>
-
-          <div style="background:#1a2235;border:1px solid #2a3a55;border-radius:10px;
-                      padding:1rem 1.5rem;margin-bottom:1.5rem;display:flex;
-                      align-items:center;gap:1rem;flex-wrap:wrap;">
-            <div style="font-size:1.4rem;">💡</div>
-            <div style="color:#8a9bbf;font-size:0.85rem;line-height:1.6;flex:1;">
-              <b style="color:#c0cfe8;">What you can do here:</b>
-              Browse the tweet feed and filter by mood in <b style="color:#ff5c5c;">Explore</b>,
-              run charts to see price swings after tweets in <b style="color:#ff5c5c;">Analysis</b>,
-              and test the prediction model live in <b style="color:#ff5c5c;">Predict</b>.
-              No finance knowledge needed.
-            </div>
-          </div>
-
-        </div>
-        """)
-
-        col_btn, _ = st.columns([1, 3])
-        with col_btn:
-            if st.button("Explore the data →", type="primary", use_container_width=True):
-                st.session_state['intro_dismissed'] = True
-                st.rerun()
-        st.stop()
+    _ov_left, _ov_right = st.columns([6, 1])
+    with _ov_right:
+        if st.button("How does this work?", use_container_width=True):
+            st.session_state['intro_dismissed'] = False
+            st.rerun()
 
     # ── Project description ───────────────────────────────────────────────────
     st.markdown("""
