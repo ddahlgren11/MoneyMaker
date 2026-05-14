@@ -389,7 +389,7 @@ tab_home, tab_explore, tab_analysis, tab_predict, tab_backtest = st.tabs([
 with tab_home:
     # ── Welcome infographic (first visit only) ────────────────────────────────
     if not st.session_state.get('intro_dismissed'):
-        st.markdown("""
+        st.html("""
         <div style="max-width:820px;margin:0 auto;">
 
           <div style="text-align:center;padding:2rem 0 1.5rem;">
@@ -455,7 +455,7 @@ with tab_home:
           </div>
 
         </div>
-        """, unsafe_allow_html=True)
+        """)
 
         col_btn, _ = st.columns([1, 3])
         with col_btn:
