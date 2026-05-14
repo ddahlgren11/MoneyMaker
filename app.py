@@ -326,28 +326,37 @@ def compute_impact_score(sentiment, likes=0, retweets=0, views=0, replies=0):
 
 # ── Shared inputs ─────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Query Parameters")
+    st.markdown("""
+    <div style="padding:0.75rem 0 1rem 0;border-bottom:1px solid #2a3a55;margin-bottom:1rem;">
+        <div style="color:#ff5c5c;font-weight:800;font-size:1.1rem;">MoneyMaker</div>
+        <div style="color:#8a9bbf;font-size:0.78rem;margin-top:0.25rem;">
+            Correlates CEO tweets with stock market movements using NLP &amp; machine learning.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    _ceo_labels = ["— select a CEO —"] + [
-        f"{v['name']}  (@{k})  —  {v['ticker']}"
-        for k, v in sorted(CEO_DATA.items(), key=lambda x: x[1]['name'])
-    ]
-    _sel = st.selectbox("Select CEO", _ceo_labels, key="ceo_selector")
+    _sorted_ceos = sorted(CEO_DATA.items(), key=lambda x: x[1]['name'])
+    _ceo_labels = [f"{v['name']}  (@{k})  —  {v['ticker']}" for k, v in _sorted_ceos]
+    _default_idx = next((i for i, (k, _) in enumerate(_sorted_ceos) if k == "elonmusk"), 0)
+    _sel = st.selectbox("Select CEO", _ceo_labels, index=_default_idx, key="ceo_selector")
 
-    if _sel != "— select a CEO —":
-        ceo_handle = _sel.split("(@")[1].split(")")[0]
-        _auto_ticker = CEO_DATA[ceo_handle]["ticker"]
-        if st.session_state.get("_last_ceo_sel") != _sel:
-            st.session_state["ticker_override"] = _auto_ticker
-            st.session_state["_last_ceo_sel"] = _sel
-    else:
-        ceo_handle = ""
-        if "_last_ceo_sel" in st.session_state:
-            del st.session_state["_last_ceo_sel"]
+    ceo_handle = _sel.split("(@")[1].split(")")[0]
+    _auto_ticker = CEO_DATA[ceo_handle]["ticker"]
+    if st.session_state.get("_last_ceo_sel") != _sel:
+        st.session_state["ticker_override"] = _auto_ticker
+        st.session_state["_last_ceo_sel"] = _sel
 
-    stock_ticker = st.text_input("Stock Ticker (auto-filled, editable)", key="ticker_override", placeholder="e.g. TSLA")
-    query_start_date = st.date_input("Start Date", value=datetime.now(pytz.utc).date() - timedelta(days=7))
-    query_end_date = st.date_input("End Date (Optional)", value=None)
+    stock_ticker = st.text_input("Stock Ticker", key="ticker_override", placeholder="e.g. TSLA")
+    query_start_date = st.date_input("From", value=datetime.now(pytz.utc).date() - timedelta(days=90))
+    query_end_date = st.date_input("To (optional)", value=None)
+
+    st.markdown("""
+    <div style="margin-top:2rem;padding-top:1rem;border-top:1px solid #2a3a55;">
+        <div style="color:#8a9bbf;font-size:0.75rem;">Built by Dillon Dahlgren</div>
+        <a href="https://github.com/ddahlgren11/MoneyMaker" target="_blank"
+           style="color:#ff5c5c;font-size:0.75rem;text-decoration:none;">View on GitHub →</a>
+    </div>
+    """, unsafe_allow_html=True)
 
 if query_end_date:
     date_display = f"{query_start_date.strftime('%Y-%m-%d')} to {query_end_date.strftime('%Y-%m-%d')}"
@@ -372,48 +381,67 @@ def weekend_shift(dt):
     return dt
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_home, tab_data, tab_impact, tab_stock, tab_drill, tab_ctx, tab_predict, tab_backtest = st.tabs(["Home", "Data", "Tweet Analysis", "Stock Analysis", "Tweet Explorer", "Market Context", "Predict", "Backtest"])
+tab_home, tab_explore, tab_analysis, tab_predict, tab_backtest = st.tabs([
+    "Overview", "Explore", "Analysis", "Predict", "Backtest"
+])
 
-# ── HOME TAB ──────────────────────────────────────────────────────────────────
+# ── OVERVIEW TAB ──────────────────────────────────────────────────────────────
 with tab_home:
+    # ── Project description ───────────────────────────────────────────────────
+    st.markdown("""
+    <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1.5rem 2rem;margin-bottom:1.5rem;">
+        <div style="color:#c0cfe8;font-size:0.95rem;line-height:1.7;">
+            MoneyMaker is a full-stack data pipeline that collects tweets from Fortune 500 CEOs,
+            scores them for sentiment using NLP, and correlates them with real stock market data.
+            A machine learning model trained on historical tweet–price pairs then predicts whether
+            a stock will close <span style="color:#26a69a;font-weight:700;">Up</span> or
+            <span style="color:#ef5350;font-weight:700;">Down</span> the following trading day.
+        </div>
+        <div style="display:flex;gap:1.5rem;margin-top:1.25rem;flex-wrap:wrap;">
+            <div style="text-align:center;">
+                <div style="color:#ff5c5c;font-weight:800;font-size:1.1rem;">Explore</div>
+                <div style="color:#8a9bbf;font-size:0.78rem;">Browse tweets &amp; stock reactions</div>
+            </div>
+            <div style="color:#2a3a55;font-size:1.2rem;align-self:center;">→</div>
+            <div style="text-align:center;">
+                <div style="color:#ff5c5c;font-weight:800;font-size:1.1rem;">Analysis</div>
+                <div style="color:#8a9bbf;font-size:0.78rem;">Price swing, impact &amp; trend charts</div>
+            </div>
+            <div style="color:#2a3a55;font-size:1.2rem;align-self:center;">→</div>
+            <div style="text-align:center;">
+                <div style="color:#ff5c5c;font-weight:800;font-size:1.1rem;">Predict</div>
+                <div style="color:#8a9bbf;font-size:0.78rem;">ML model next-day direction</div>
+            </div>
+            <div style="color:#2a3a55;font-size:1.2rem;align-self:center;">→</div>
+            <div style="text-align:center;">
+                <div style="color:#ff5c5c;font-weight:800;font-size:1.1rem;">Backtest</div>
+                <div style="color:#8a9bbf;font-size:0.78rem;">Validate model accuracy</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
     db_data = load_dashboard_data()
 
     if db_data is None:
-        # ── Getting started ───────────────────────────────────────────────────
-        st.markdown("### Welcome to MoneyMaker")
-        st.markdown("No tweet data found in the database yet.")
-        st.markdown("---")
-        features = [
-            ("Data", "Pull raw tweets, stock prices, and merged data for any CEO and ticker."),
-            ("Price Swing Analysis", "See whether high-sentiment tweet days coincide with unusual stock volatility."),
-            ("Tweet Impact", "Measure same-day stock reaction on days a CEO posted a high-sentiment tweet."),
-            ("Post-Tweet Trend", "Track how a stock drifts over N trading days after a tweet on a radar chart."),
-            ("Stock Analysis", "Full candlestick chart with RSI, MACD, Bollinger Bands, and moving averages."),
-            ("Tweet Explorer", "Select any tweet and see the stock chart around that exact date."),
-            ("Market Context", "Compare stock performance vs SPY and sector ETFs, with earnings and news overlaid."),
-        ]
-        cols = st.columns(2)
-        for i, (name, desc) in enumerate(features):
-            with cols[i % 2]:
-                st.markdown(f"""
-                <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:10px;padding:1rem;margin-bottom:0.75rem;">
-                    <div style="color:#ff5c5c;font-weight:700;font-size:0.9rem;margin-bottom:0.25rem;">{name}</div>
-                    <div style="color:#c0cfe8;font-size:0.82rem;">{desc}</div>
-                </div>
-                """, unsafe_allow_html=True)
+        st.info("No data loaded yet — select a CEO in the sidebar to get started.")
     else:
         # ── Stats ─────────────────────────────────────────────────────────────
         total_records = len(db_data)
         unique_ceos = db_data['ceo'].nunique()
         avg_sentiment = db_data['sentiment_score'].mean()
         top_ceo = db_data['ceo'].value_counts().idxmax()
+        top_ceo_name = CEO_DATA.get(top_ceo, {}).get("name", f"@{top_ceo}")
         top_ceo_count = db_data['ceo'].value_counts().max()
+        labeled = db_data['next_day_direction'].notna().sum()
+        up_pct = (db_data['next_day_direction'] == 1).sum() / labeled * 100 if labeled else 0
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total Tweets Analyzed", f"{total_records:,}")
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Tweets Analyzed", f"{total_records:,}")
         m2.metric("CEOs Tracked", str(unique_ceos))
-        m3.metric("Avg Sentiment Score", f"{avg_sentiment:.3f}")
-        m4.metric("Most Analyzed CEO", f"@{top_ceo}", f"{top_ceo_count} tweets")
+        m3.metric("Avg Sentiment", f"{avg_sentiment:+.3f}")
+        m4.metric("Most Covered", top_ceo_name, f"{top_ceo_count} tweets")
+        m5.metric("Next-Day Up %", f"{up_pct:.1f}%", f"{labeled:,} labeled")
 
         st.markdown("---")
 
@@ -421,140 +449,131 @@ with tab_home:
         chart_col1, chart_col2 = st.columns(2)
 
         with chart_col1:
-            st.subheader("Tweets by CEO")
+            st.subheader("Tweet Volume by CEO")
             tweet_counts = db_data['ceo'].value_counts().reset_index()
             tweet_counts.columns = ['ceo', 'count']
+            tweet_counts['label'] = tweet_counts['ceo'].map(
+                lambda h: CEO_DATA.get(h, {}).get("name", h)
+            )
             fig_counts = go.Figure(go.Bar(
-                x=tweet_counts['ceo'], y=tweet_counts['count'],
+                x=tweet_counts['label'], y=tweet_counts['count'],
                 marker_color='#ff5c5c', text=tweet_counts['count'],
                 textposition='outside',
             ))
             fig_counts.update_layout(
-                template='plotly_dark', height=300,
-                margin=dict(l=0, r=0, t=10, b=0),
+                template='plotly_dark', height=320,
+                margin=dict(l=0, r=0, t=10, b=60),
                 paper_bgcolor='#1a1f2e', plot_bgcolor='#1a1f2e',
                 yaxis=dict(gridcolor='#2a3a55'),
+                xaxis=dict(tickangle=-35),
             )
             st.plotly_chart(fig_counts, use_container_width=True)
 
         with chart_col2:
-            st.subheader("Avg Sentiment by CEO")
+            st.subheader("Avg Sentiment Score by CEO")
             avg_by_ceo = db_data.groupby('ceo')['sentiment_score'].mean().reset_index()
             avg_by_ceo.columns = ['ceo', 'avg_sentiment']
             avg_by_ceo = avg_by_ceo.sort_values('avg_sentiment', ascending=False)
-            bar_colors = ['#ff5c5c' if v >= 0 else '#ef5350' for v in avg_by_ceo['avg_sentiment']]
+            avg_by_ceo['label'] = avg_by_ceo['ceo'].map(
+                lambda h: CEO_DATA.get(h, {}).get("name", h)
+            )
+            bar_colors = ['#26a69a' if v >= 0 else '#ef5350' for v in avg_by_ceo['avg_sentiment']]
             fig_sent = go.Figure(go.Bar(
-                x=avg_by_ceo['ceo'], y=avg_by_ceo['avg_sentiment'],
+                x=avg_by_ceo['label'], y=avg_by_ceo['avg_sentiment'],
                 marker_color=bar_colors,
                 text=avg_by_ceo['avg_sentiment'].round(3),
                 textposition='outside',
             ))
             fig_sent.update_layout(
-                template='plotly_dark', height=300,
-                margin=dict(l=0, r=0, t=10, b=0),
+                template='plotly_dark', height=320,
+                margin=dict(l=0, r=0, t=10, b=60),
                 paper_bgcolor='#1a1f2e', plot_bgcolor='#1a1f2e',
                 yaxis=dict(gridcolor='#2a3a55'),
+                xaxis=dict(tickangle=-35),
             )
             st.plotly_chart(fig_sent, use_container_width=True)
 
         st.markdown("---")
 
         # ── Top tweets ────────────────────────────────────────────────────────
-        st.subheader("Top 5 Most Positive Tweets")
-        top_positive = db_data.nlargest(5, 'sentiment_score')[['date', 'ceo', 'tweet_text', 'sentiment_score', 'stock_ticker']].reset_index(drop=True)
-        st.dataframe(top_positive, use_container_width=True)
+        hi_col, lo_col = st.columns(2)
+        with hi_col:
+            st.subheader("Most Positive Tweets")
+            top_positive = db_data.nlargest(5, 'sentiment_score')[
+                ['date', 'ceo', 'tweet_text', 'sentiment_score', 'stock_ticker']
+            ].reset_index(drop=True)
+            top_positive['ceo'] = top_positive['ceo'].map(
+                lambda h: CEO_DATA.get(h, {}).get("name", h)
+            )
+            st.dataframe(top_positive, use_container_width=True, height=220)
 
-        st.subheader("Top 5 Most Negative Tweets")
-        top_negative = db_data.nsmallest(5, 'sentiment_score')[['date', 'ceo', 'tweet_text', 'sentiment_score', 'stock_ticker']].reset_index(drop=True)
-        st.dataframe(top_negative, use_container_width=True)
+        with lo_col:
+            st.subheader("Most Negative Tweets")
+            top_negative = db_data.nsmallest(5, 'sentiment_score')[
+                ['date', 'ceo', 'tweet_text', 'sentiment_score', 'stock_ticker']
+            ].reset_index(drop=True)
+            top_negative['ceo'] = top_negative['ceo'].map(
+                lambda h: CEO_DATA.get(h, {}).get("name", h)
+            )
+            st.dataframe(top_negative, use_container_width=True, height=220)
 
-# ── DATA TAB ──────────────────────────────────────────────────────────────────
-with tab_data:
-    btn_col1, btn_col2, btn_col3 = st.columns(3)
+# ── EXPLORE TAB ───────────────────────────────────────────────────────────────
+with tab_explore:
+    # ── Auto-load tweet feed ───────────────────────────────────────────────────
+    ceo_name = CEO_DATA.get(ceo_handle, {}).get("name", ceo_handle)
+    st.markdown(f"### Tweets — {ceo_name}")
+    st.caption("Showing stored tweets from the database. Use the sidebar to change CEO or date range.")
 
-    with btn_col1:
-        pull_tweets = st.button("Pull Tweets", type="primary", use_container_width=True)
-    with btn_col2:
-        pull_stocks = st.button("Pull Stock Data", type="primary", use_container_width=True)
-    with btn_col3:
-        pull_merged = st.button("Pull Merged Data", type="primary", use_container_width=True)
+    with st.spinner(f"Loading tweets for {ceo_name}..."):
+        _explore_df = _fetch_tweets_df(ceo_handle)
 
-    data_results = st.container()
-
-    if pull_tweets:
-        if not ceo_handle:
-            st.error("Please enter a CEO Twitter Handle.")
+    if _explore_df.empty:
+        st.info("No tweets found for this CEO yet.")
+    else:
+        _filtered_explore = filter_tweets_by_date(_explore_df).sort_values('date', ascending=False)
+        if _filtered_explore.empty:
+            st.info("No tweets in this date range — try widening the date window in the sidebar.")
         else:
-            with st.spinner(f"Pulling tweets for @{ceo_handle}..."):
-                try:
-                    tweets_df = _fetch_tweets_df(ceo_handle)
-                    if not tweets_df.empty and 'date' in tweets_df.columns:
-                        filtered = filter_tweets_by_date(tweets_df).sort_values('date', ascending=False)
-                        filtered['date'] = filtered['date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                        with data_results:
-                            st.subheader(f"Tweets for @{ceo_handle} ({date_display})")
-                            if filtered.empty:
-                                st.info("No tweets found for this date range.")
-                            else:
-                                filtered['impact_score'] = [
-                                    compute_impact_score(row['sentiment'], row.get('likes', 0), row.get('retweet_count', 0), row.get('view_count', 0), row.get('reply_count', 0))
-                                    for _, row in filtered.iterrows()
-                                ]
-                                show = [c for c in ['date', 'text', 'sentiment', 'refined_sentiment', 'tone_category', 'tweet_type', 'impact_score'] if c in filtered.columns]
-                                st.dataframe(filtered[show], use_container_width=True)
-                    else:
-                        with data_results:
-                            st.info("No tweets found.")
-                except Exception as e:
-                    st.error(f"Failed to fetch tweets: {str(e)}")
+            _filtered_explore = _filtered_explore.copy()
+            _filtered_explore['impact_score'] = [
+                compute_impact_score(r['sentiment'], r.get('likes', 0), r.get('retweet_count', 0),
+                                     r.get('view_count', 0), r.get('reply_count', 0))
+                for _, r in _filtered_explore.iterrows()
+            ]
+            _filtered_explore['date'] = _filtered_explore['date'].dt.strftime('%Y-%m-%d')
+            _show_cols = [c for c in ['date', 'text', 'sentiment', 'refined_sentiment',
+                                       'tone_category', 'tweet_type', 'impact_score',
+                                       'likes', 'retweet_count'] if c in _filtered_explore.columns]
+            st.dataframe(_filtered_explore[_show_cols].rename(columns={
+                'text': 'tweet', 'sentiment': 'sentiment score',
+                'refined_sentiment': 'sentiment label', 'tone_category': 'tone',
+                'tweet_type': 'type', 'impact_score': 'impact',
+                'retweet_count': 'retweets',
+            }), use_container_width=True, height=320)
+            st.caption(f"{len(_filtered_explore)} tweets · sentiment scored with VADER NLP · impact = sentiment strength × engagement reach")
 
-    if pull_stocks:
+    st.markdown("---")
+
+    # ── Raw database view ──────────────────────────────────────────────────────
+    with st.expander("View full dataset (all features stored per tweet)"):
         if not stock_ticker:
-            st.error("Please enter a Stock Ticker.")
+            st.info("Enter a stock ticker in the sidebar to load the full dataset.")
         else:
-            with st.spinner(f"Pulling stock data for {stock_ticker.upper()}..."):
-                try:
-                    start_dt = datetime.combine(query_start_date, datetime.min.time()).replace(tzinfo=pytz.utc) - timedelta(days=2)
-                    end_dt = datetime.combine(query_end_date, datetime.max.time()).replace(tzinfo=pytz.utc) + timedelta(days=2) if query_end_date else None
-                    stocks_df = _fetch_stocks_df(stock_ticker, start_date=start_dt, end_date=end_dt)
-                    if not stocks_df.empty:
-                        display = stocks_df.reset_index()
-                        if 'timestamp' in display.columns:
-                            display['timestamp'] = display['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                        show_cols = [c for c in ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'trade_count', 'vwap'] if c in display.columns]
-                        with data_results:
-                            st.subheader(f"Stock Data for {stock_ticker.upper()} ({date_display})")
-                            st.dataframe(display[show_cols], use_container_width=True)
-                    else:
-                        with data_results:
-                            st.info("No stock data found for this date range.")
-                except Exception as e:
-                    st.error(f"Failed to fetch stock data: {str(e)}\n{traceback.format_exc()}")
+            _raw_df = _query_merged(
+                ceo=ceo_handle,
+                ticker=stock_ticker,
+                start_date=query_start_date.isoformat() if query_start_date else None,
+                end_date=query_end_date.isoformat() if query_end_date else None,
+                limit=500,
+            )
+            if _raw_df.empty:
+                st.info("No records found for this selection.")
+            else:
+                st.dataframe(_raw_df, use_container_width=True)
+                st.caption(f"{len(_raw_df)} records · includes sentiment, engagement, RSI, ATR, VIX, FinBERT score, news sentiment, days to earnings")
 
-    if pull_merged:
-        if not ceo_handle or not stock_ticker:
-            st.error("Please enter a CEO Twitter Handle and a Stock Ticker.")
-        else:
-            with st.spinner("Loading merged data from database..."):
-                try:
-                    merged_df = _query_merged(
-                        ceo=ceo_handle,
-                        ticker=stock_ticker,
-                        start_date=query_start_date.isoformat() if query_start_date else None,
-                        end_date=query_end_date.isoformat() if query_end_date else None,
-                        limit=500,
-                    )
-                    with data_results:
-                        st.subheader(f"Merged Data (@{ceo_handle} & {stock_ticker.upper()}) ({date_display})")
-                        if merged_df.empty:
-                            st.info("No merged data found for this selection.")
-                        else:
-                            st.dataframe(merged_df, use_container_width=True)
-                except Exception as e:
-                    st.error(f"Failed to fetch merged data: {str(e)}")
-
-# ── STOCK ANALYSIS TAB — Price Swing section ─────────────────────────────────────────
-with tab_stock:
+# ── ANALYSIS TAB: Price Swing ─────────────────────────────────────────────────
+with tab_analysis:
     st.markdown("### Price Swing Analysis")
     st.markdown("Identifies periods where high-sentiment tweets coincide with unusual stock volatility relative to the normal 14-day price swing.")
     run_atr = st.button("Run Price Swing Analysis", type="primary")
@@ -670,8 +689,8 @@ with tab_stock:
                 except Exception as e:
                     st.error(f"Price Swing Analysis failed: {str(e)}\n{traceback.format_exc()}")
 
-# ── TWEET ANALYSIS TAB (Tweet Impact + Post-Tweet Trend) ─────────────────────
-with tab_impact:
+# ── ANALYSIS TAB: Tweet Impact + Post-Tweet Trend ────────────────────────────
+with tab_analysis:
     st.markdown("### Tweet Impact")
     st.markdown("Measures same-day stock reaction on days a high-sentiment tweet was posted. Compares open-to-close move and volume against the 14-day baseline.")
     run_impact = st.button("Run Tweet Impact", type="primary")
@@ -948,8 +967,8 @@ with tab_impact:
                 except Exception as e:
                     st.error(f"Post-Tweet Trend analysis failed: {str(e)}\n{traceback.format_exc()}")
 
-# ── STOCK ANALYSIS TAB — Chart section ───────────────────────────────────────
-with tab_stock:
+# ── ANALYSIS TAB: Stock Chart ────────────────────────────────────────────────
+with tab_analysis:
     st.markdown("---")
     st.markdown("### Stock Chart")
 
@@ -1139,65 +1158,58 @@ with tab_stock:
                 except Exception as e:
                     st.error(f"Stock analysis failed: {str(e)}\n{traceback.format_exc()}")
 
-# ── TWEET EXPLORER TAB ────────────────────────────────────────────────────────
-with tab_drill:
-    st.markdown("Fetch tweets, select one, then choose a stock to see how it moved around that tweet's date.")
+# ── EXPLORE TAB: Tweet Explorer ───────────────────────────────────────────────
+with tab_explore:
+    st.markdown("---")
+    st.markdown("### Tweet Explorer")
+    st.caption("Click any tweet below to see how the stock moved around that date.")
 
     CEO_TICKER_MAP = {k: v["ticker"] for k, v in CEO_DATA.items()}
 
-    if st.button("Fetch Tweets", type="primary", key="drill_fetch"):
-        if not ceo_handle:
-            st.error("Please enter a CEO Twitter Handle above.")
-        else:
-            with st.spinner(f"Fetching tweets for @{ceo_handle}..."):
-                try:
-                    tweets_df = _fetch_tweets_df(ceo_handle)
-                    if not tweets_df.empty and 'date' in tweets_df.columns:
-                        tweets_df = filter_tweets_by_date(tweets_df)
-                        tweets_df = tweets_df.sort_values('date', ascending=False).reset_index(drop=True)
-                        tweets_df['date_str'] = tweets_df['date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                        tweets_df['impact_score'] = [
-                            compute_impact_score(row['sentiment'], row.get('likes', 0), row.get('retweet_count', 0), row.get('view_count', 0), row.get('reply_count', 0))
-                            for _, row in tweets_df.iterrows()
-                        ]
-                    st.session_state['drill_tweets'] = tweets_df
-                    st.session_state['drill_ceo'] = ceo_handle
-                except Exception as e:
-                    st.error(f"Failed to fetch tweets: {str(e)}")
+    # Use the already-loaded tweet data — no button needed
+    _drill_df = _fetch_tweets_df(ceo_handle)
+    if not _drill_df.empty and 'date' in _drill_df.columns:
+        _drill_df = filter_tweets_by_date(_drill_df)
+        _drill_df = _drill_df.sort_values('date', ascending=False).reset_index(drop=True)
+        _drill_df['date_str'] = _drill_df['date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        _drill_df['impact_score'] = [
+            compute_impact_score(row['sentiment'], row.get('likes', 0), row.get('retweet_count', 0),
+                                 row.get('view_count', 0), row.get('reply_count', 0))
+            for _, row in _drill_df.iterrows()
+        ]
 
-    if 'drill_tweets' in st.session_state and not st.session_state['drill_tweets'].empty:
-        df = st.session_state['drill_tweets']
-
+    if not _drill_df.empty:
         fc1, fc2, fc3 = st.columns(3)
         with fc1:
-            sent_opts = sorted(df['refined_sentiment'].unique().tolist()) if 'refined_sentiment' in df.columns else []
+            sent_opts = sorted(_drill_df['refined_sentiment'].unique().tolist()) if 'refined_sentiment' in _drill_df.columns else []
             sent_filter = st.multiselect("Filter by Sentiment", sent_opts, key="drill_sent_filter")
         with fc2:
-            tone_col = 'tone_category' if 'tone_category' in df.columns else 'tone'
-            tone_opts = sorted(df[tone_col].unique().tolist()) if tone_col in df.columns else []
+            tone_opts = sorted(_drill_df['tone_category'].unique().tolist()) if 'tone_category' in _drill_df.columns else []
             tone_filter = st.multiselect("Filter by Tone", tone_opts, key="drill_tone_filter")
         with fc3:
-            type_opts = sorted(df['tweet_type'].unique().tolist()) if 'tweet_type' in df.columns else []
+            type_opts = sorted(_drill_df['tweet_type'].unique().tolist()) if 'tweet_type' in _drill_df.columns else []
             type_filter = st.multiselect("Filter by Type", type_opts, key="drill_type_filter")
 
-        fdf = df.copy()
-        if sent_filter and 'refined_sentiment' in fdf.columns:
+        fdf = _drill_df.copy()
+        if sent_filter:
             fdf = fdf[fdf['refined_sentiment'].isin(sent_filter)]
-        tone_col = 'tone_category' if 'tone_category' in fdf.columns else 'tone'
-        if tone_filter and tone_col in fdf.columns:
-            fdf = fdf[fdf[tone_col].isin(tone_filter)]
-        if type_filter and 'tweet_type' in fdf.columns:
+        if tone_filter:
+            fdf = fdf[fdf['tone_category'].isin(tone_filter)]
+        if type_filter:
             fdf = fdf[fdf['tweet_type'].isin(type_filter)]
 
-        st.markdown(f"**Tweets for @{st.session_state.get('drill_ceo', '')}** — {len(fdf)} shown, click a row to select it")
+        st.caption(f"{len(fdf)} tweets shown — click a row to see the stock chart around that date")
 
-        show_cols = [c for c in ['date_str', 'text', 'impact_score', 'sentiment', 'refined_sentiment', 'tone_category', 'tweet_type'] if c in fdf.columns]
+        _drill_show = [c for c in ['date_str', 'text', 'impact_score', 'sentiment', 'refined_sentiment', 'tone_category', 'tweet_type'] if c in fdf.columns]
         event = st.dataframe(
-            fdf[show_cols].rename(columns={'date_str': 'date'}),
+            fdf[_drill_show].rename(columns={'date_str': 'date', 'text': 'tweet',
+                                             'sentiment': 'score', 'refined_sentiment': 'label',
+                                             'tone_category': 'tone', 'tweet_type': 'type',
+                                             'impact_score': 'impact'}),
             use_container_width=True,
             on_select="rerun",
             selection_mode="single-row",
-            height=300,
+            height=280,
         )
 
         selected_rows = event.selection.rows
@@ -1211,14 +1223,14 @@ with tab_drill:
             st.markdown(f"**Selected tweet** — {tweet_date_str}")
             st.info(f'"{tweet_text}"')
 
-            sentiment_label = "Very Positive" if tweet_sentiment >= 0.6 else \
-                              "Positive" if tweet_sentiment >= 0.2 else \
-                              "Neutral" if tweet_sentiment >= -0.2 else \
-                              "Negative" if tweet_sentiment >= -0.6 else "Very Negative"
+            sentiment_label = ("Very Positive" if tweet_sentiment >= 0.6 else
+                               "Positive" if tweet_sentiment >= 0.2 else
+                               "Neutral" if tweet_sentiment >= -0.2 else
+                               "Negative" if tweet_sentiment >= -0.6 else "Very Negative")
             st.caption(f"Sentiment: {tweet_sentiment:.3f} — {sentiment_label}")
 
-            st.markdown("#### Stock to analyze")
-            auto_ticker = CEO_TICKER_MAP.get(st.session_state.get('drill_ceo', '').lower(), stock_ticker or "")
+            st.markdown("#### Stock around this tweet")
+            auto_ticker = CEO_TICKER_MAP.get(ceo_handle, stock_ticker or "")
             dc1, dc2 = st.columns([1, 2])
             with dc1:
                 drill_ticker = st.text_input("Ticker", value=auto_ticker, key="drill_ticker", placeholder="e.g. TSLA")
@@ -1398,8 +1410,8 @@ with tab_drill:
                     except Exception as e:
                         st.error(f"Failed to load stock data: {str(e)}\n{traceback.format_exc()}")
 
-# ── MARKET CONTEXT TAB ────────────────────────────────────────────────────────
-with tab_ctx:
+# ── ANALYSIS TAB: Market Context ─────────────────────────────────────────────
+with tab_analysis:
     st.markdown("See whether a stock's price move was caused by a tweet — or by something bigger happening in the market.")
 
     CEO_COMPANY_MAP = {
