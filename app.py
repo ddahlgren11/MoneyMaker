@@ -358,6 +358,11 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    if st.session_state.get('intro_dismissed'):
+        if st.button("How does this work?", use_container_width=True):
+            st.session_state['intro_dismissed'] = False
+            st.rerun()
+
 if query_end_date:
     date_display = f"{query_start_date.strftime('%Y-%m-%d')} to {query_end_date.strftime('%Y-%m-%d')}"
 else:
