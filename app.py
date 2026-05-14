@@ -460,8 +460,8 @@ def weekend_shift(dt):
     return dt
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_home, tab_explore, tab_analysis, tab_predict, tab_backtest = st.tabs([
-    "Overview", "Explore", "Analysis", "Predict", "Backtest"
+tab_home, tab_explore, tab_analysis, tab_predict, tab_backtest, tab_guide = st.tabs([
+    "Overview", "Explore", "Analysis", "Predict", "Backtest", "Guide"
 ])
 
 # ── OVERVIEW TAB ──────────────────────────────────────────────────────────────
@@ -1980,3 +1980,207 @@ with tab_backtest:
 
                 except Exception as e:
                     st.error(f"Backtest failed: {str(e)}\n{traceback.format_exc()}")
+
+# ── GUIDE TAB ─────────────────────────────────────────────────────────────────
+with tab_guide:
+    st.markdown("### How to Read This App")
+    st.caption("Everything you need to know to make sense of the numbers — no finance background required.")
+
+    st.markdown("---")
+
+    # ── Sentiment score ────────────────────────────────────────────────────────
+    st.markdown("#### What is a Sentiment Score?")
+    st.markdown(
+        "Every tweet is run through a language model that reads the emotional tone and assigns it a score "
+        "between **−1** (as negative as possible) and **+1** (as positive as possible). "
+        "A score near zero means the tweet was neutral or mixed — like a routine announcement."
+    )
+    st.html("""
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:0.6rem;margin:1rem 0 1.5rem;">
+
+      <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1rem;text-align:center;">
+        <div style="color:#26a69a;font-size:1.4rem;font-weight:800;">+0.9 → +1.0</div>
+        <div style="color:#c0cfe8;font-weight:700;font-size:0.85rem;margin:0.4rem 0;">Strongly Positive</div>
+        <div style="color:#8a9bbf;font-size:0.78rem;line-height:1.5;">
+          Celebration, major good news, or very enthusiastic language. Rare — usually tied to a big product launch or milestone.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1rem;text-align:center;">
+        <div style="color:#66bb6a;font-size:1.4rem;font-weight:800;">+0.5 → +0.9</div>
+        <div style="color:#c0cfe8;font-weight:700;font-size:0.85rem;margin:0.4rem 0;">Positive</div>
+        <div style="color:#8a9bbf;font-size:0.78rem;line-height:1.5;">
+          Upbeat tone, good news, encouragement. The most common "positive" range.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1rem;text-align:center;">
+        <div style="color:#bdbdbd;font-size:1.4rem;font-weight:800;">−0.5 → +0.5</div>
+        <div style="color:#c0cfe8;font-weight:700;font-size:0.85rem;margin:0.4rem 0;">Neutral</div>
+        <div style="color:#8a9bbf;font-size:0.78rem;line-height:1.5;">
+          Informational, routine, or mixed messages. Think "earnings call" language.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1rem;text-align:center;">
+        <div style="color:#ef9a9a;font-size:1.4rem;font-weight:800;">−0.9 → −0.5</div>
+        <div style="color:#c0cfe8;font-weight:700;font-size:0.85rem;margin:0.4rem 0;">Negative</div>
+        <div style="color:#8a9bbf;font-size:0.78rem;line-height:1.5;">
+          Frustration, criticism, concern, or pushback.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1rem;text-align:center;">
+        <div style="color:#ef5350;font-size:1.4rem;font-weight:800;">−1.0 → −0.9</div>
+        <div style="color:#c0cfe8;font-weight:700;font-size:0.85rem;margin:0.4rem 0;">Strongly Negative</div>
+        <div style="color:#8a9bbf;font-size:0.78rem;line-height:1.5;">
+          Very harsh, distress signals, or public conflict. Very rare.
+        </div>
+      </div>
+
+    </div>
+    """)
+
+    st.markdown("---")
+
+    # ── Sentiment strength buckets ─────────────────────────────────────────────
+    st.markdown("#### Sentiment Strength Buckets (Analysis Tab)")
+    st.markdown(
+        "When the Analysis tab looks at how much a tweet affected the stock, it groups tweets into "
+        "three buckets based on how strong the emotion was. A stronger tweet doesn't always mean a "
+        "bigger stock move — but the pattern becomes clearer when you look at them grouped."
+    )
+    st.html("""
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem;margin:1rem 0 1.5rem;">
+
+      <div style="background:#1a1f2e;border:2px solid #26a69a;border-radius:12px;padding:1.25rem;">
+        <div style="color:#26a69a;font-size:1.1rem;font-weight:800;margin-bottom:0.4rem;">Very High — 0.9+</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          The tweet was near the absolute top of the positivity scale. These are the ones most likely
+          to show up on financial news and most likely to coincide with a price spike — but they're also
+          the easiest for the market to ignore if everyone already expected the good news.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:2px solid #ff8c5c;border-radius:12px;padding:1.25rem;">
+        <div style="color:#ff8c5c;font-size:1.1rem;font-weight:800;margin-bottom:0.4rem;">High — 0.7 to 0.9</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          Clearly positive but not extreme. This bucket tends to have the most tweets and often shows
+          the most consistent correlation with the next-day stock move.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:2px solid #8a9bbf;border-radius:12px;padding:1.25rem;">
+        <div style="color:#8a9bbf;font-size:1.1rem;font-weight:800;margin-bottom:0.4rem;">Moderate — 0.5 to 0.7</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          Mildly positive. The correlation with stock moves is weaker here — the market mostly
+          shrugs at routine upbeat tweets. Useful as background context rather than a signal.
+        </div>
+      </div>
+
+    </div>
+    """)
+
+    st.markdown("---")
+
+    # ── Model confidence ───────────────────────────────────────────────────────
+    st.markdown("#### Model Confidence % (Predict Tab)")
+    st.markdown(
+        "When the model makes a prediction, it also gives you a **confidence percentage** — "
+        "how strongly it believes the stock will go in that direction based on patterns it learned "
+        "from thousands of past tweet-stock pairs. Think of it like a weather forecast: "
+        "70% confidence doesn't mean it's guaranteed, but it means the evidence leans that way."
+    )
+    st.html("""
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0.75rem;margin:1rem 0 1.5rem;">
+
+      <div style="background:#1a1f2e;border:2px solid #ef5350;border-radius:12px;padding:1.25rem;">
+        <div style="color:#ef5350;font-size:1.1rem;font-weight:800;margin-bottom:0.4rem;">50 – 62% — Weak Signal</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          Barely leaning one way. The model saw some pattern but it's inconsistent with what it
+          learned before. Treat this like a coin flip — interesting to note, but not actionable.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:2px solid #ff8c5c;border-radius:12px;padding:1.25rem;">
+        <div style="color:#ff8c5c;font-size:1.1rem;font-weight:800;margin-bottom:0.4rem;">62 – 75% — Moderate Signal</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          The model is picking up a consistent pattern. This is worth noting alongside other
+          context — look at the sentiment score, what the tweet actually said, and how the stock
+          has been moving recently.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:2px solid #26a69a;border-radius:12px;padding:1.25rem;">
+        <div style="color:#26a69a;font-size:1.1rem;font-weight:800;margin-bottom:0.4rem;">75%+ — Strong Signal</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          The pattern is strongly consistent with what the model has seen before. Still not a
+          guarantee — markets are unpredictable — but this is where the model has historically
+          been most accurate.
+        </div>
+      </div>
+
+    </div>
+    """)
+
+    st.markdown("---")
+
+    # ── Practical use cases ────────────────────────────────────────────────────
+    st.markdown("#### What Can You Actually Do With This?")
+    st.html("""
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin:1rem 0 1.5rem;">
+
+      <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1.25rem;">
+        <div style="color:#ff5c5c;font-weight:700;font-size:0.9rem;margin-bottom:0.5rem;">🔍 Historical Research</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          Pick a CEO and a time window and see exactly what they were saying publicly and how
+          the stock reacted. Great for understanding a company's story around a specific event —
+          a product launch, a controversy, or a down quarter.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1.25rem;">
+        <div style="color:#ff5c5c;font-weight:700;font-size:0.9rem;margin-bottom:0.5rem;">📊 Pattern Spotting</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          Use the Analysis tab to find whether a particular CEO's very positive tweets tend to
+          move the stock more than average. Some executives consistently move their stock with
+          their words — others don't.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1.25rem;">
+        <div style="color:#ff5c5c;font-weight:700;font-size:0.9rem;margin-bottom:0.5rem;">🤖 Test the Model</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          In the Predict tab, type in any hypothetical tweet and see what the model would say.
+          Try changing the wording — "We're thrilled" vs "We're cautiously optimistic" — and
+          watch how the prediction and confidence change.
+        </div>
+      </div>
+
+      <div style="background:#1a1f2e;border:1px solid #2a3a55;border-radius:12px;padding:1.25rem;">
+        <div style="color:#ff5c5c;font-weight:700;font-size:0.9rem;margin-bottom:0.5rem;">📅 Pre-Earnings Check</div>
+        <div style="color:#c0cfe8;font-size:0.83rem;line-height:1.6;">
+          Before an earnings report, look at what the CEO has been tweeting in the past few weeks.
+          A pattern of unusually positive language going into earnings has historically been
+          correlated with stock run-ups — and the reverse too.
+        </div>
+      </div>
+
+    </div>
+    """)
+
+    st.markdown("---")
+
+    st.html("""
+    <div style="background:#1a2235;border:1px solid #2a3a55;border-radius:10px;
+                padding:1rem 1.5rem;display:flex;align-items:flex-start;gap:1rem;">
+      <div style="font-size:1.3rem;margin-top:0.1rem;">⚠️</div>
+      <div style="color:#8a9bbf;font-size:0.82rem;line-height:1.7;">
+        <b style="color:#c0cfe8;">Not financial advice.</b>
+        MoneyMaker is a research and learning tool. The model is trained on historical data and
+        correlations — it cannot predict the future, and past patterns don't guarantee future results.
+        Markets are affected by many factors beyond CEO tweets. Don't make investment decisions
+        based solely on anything shown here.
+      </div>
+    </div>
+    """)
