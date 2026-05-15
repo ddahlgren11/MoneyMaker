@@ -30,12 +30,6 @@ uvicorn main:app --reload
 **4. Start the Streamlit dashboard** (Terminal 2)
 ```bash
 streamlit run app.py
-<<<<<<< HEAD
-```
-
-
-Run both in separate terminal tabs.
-=======
 ```
 - Runs at http://localhost:8501
 
@@ -357,7 +351,6 @@ Four tables (auto-created by SQLAlchemy on startup):
 | finbert_score | Float | FinBERT financial sentiment [-1, 1] |
 | vix_at_tweet | Float | VIX close on tweet day |
 | days_to_earnings | Integer | Calendar days to nearest earnings date |
->>>>>>> three-tier-refactor
 
 ---
 
