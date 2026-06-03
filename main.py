@@ -19,6 +19,10 @@ from context import get_news_for_date, get_earnings_dates, build_news_sentiment_
 from model.predict import predict_tweets
 from targets import CEO_TARGETS, HANDLE_TO_TICKER
 from pipeline_utils import build_vix_lookup, days_to_nearest_earnings, shift_weekend_to_monday, compute_technicals
+from classifier import get_tweet_topic, CEO_TOPIC_UNIVERSE
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
 
 load_dotenv()
 
@@ -67,6 +71,42 @@ class NewsSentimentCache(Base):
     ticker   = Column(String, primary_key=True)
     date_str = Column(String, primary_key=True)  # YYYY-MM-DD
     sentiment_score = Column(Float)
+
+class CeoTickerRelationship(Base):
+    __tablename__ = "ceo_ticker_relationships"
+    id                = Column(Integer, primary_key=True, index=True)
+    ceo               = Column(String, nullable=False)
+    topic             = Column(String, nullable=False)
+    ticker            = Column(String, nullable=False)
+    samples           = Column(Integer)
+    hit_rate          = Column(Float)
+    p_value           = Column(Float)
+    avg_abs_move_pct  = Column(Float)
+    baseline_move_pct = Column(Float)
+    volatility_ratio  = Column(Float)
+    tightness_score   = Column(Float)
+    last_computed     = Column(String)
+
+class PaperTrade(Base):
+    __tablename__ = "paper_trades"
+    id                  = Column(Integer, primary_key=True, index=True)
+    timestamp           = Column(String)
+    ceo                 = Column(String)
+    tweet_text          = Column(String)
+    tweet_date          = Column(String)
+    topic               = Column(String)
+    ticker              = Column(String)
+    side                = Column(String)   # "buy", "sell_short", "none"
+    notional            = Column(Float)
+    qty                 = Column(Float, nullable=True)
+    predicted_direction = Column(String)
+    confidence_pct      = Column(Float)
+    sentiment_score     = Column(Float)
+    tightness_score     = Column(Float, nullable=True)
+    alpaca_order_id     = Column(String, nullable=True)
+    status              = Column(String)   # "placed", "skipped", "error"
+    skip_reason         = Column(String, nullable=True)
+    error_msg           = Column(String, nullable=True)
 
 class MergedRecord(Base):
     __tablename__ = "merged_data"
@@ -153,6 +193,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 proc = DataProcessor()
+
+_trading_client = TradingClient(
+    api_key=os.getenv("ALPACA_PAPER_API_KEY"),
+    secret_key=os.getenv("ALPACA_PAPER_SECRET_KEY"),
+    paper=True,
+)
+
+TRADE_NOTIONAL       = 1000.0
+CONFIDENCE_THRESHOLD = 55.0
+TIGHTNESS_THRESHOLD  = 0.20
+STALENESS_HOURS      = 48
 
 # --- ACTIVE "CONTROLLER" ENDPOINT ---
 
@@ -744,3 +795,337 @@ def api_post_tweet_trend(ceo: str, ticker: str, db: Session = Depends(get_db)):
         b["up_pct"] = round(b["up"] / total * 100, 1) if total else 0
 
     return {"status": "success", "data": buckets}
+
+
+# ---------------------------------------------------------------------------
+# Relationship registry endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/relationships")
+def api_get_relationships(
+    ceo: Optional[str] = None,
+    topic: Optional[str] = None,
+    min_tightness: float = 0.0,
+    min_samples: int = 0,
+    db: Session = Depends(get_db),
+):
+    """Return scored (CEO, topic, ticker) relationships from the registry."""
+    q = db.query(CeoTickerRelationship)
+    if ceo:
+        q = q.filter(CeoTickerRelationship.ceo == ceo)
+    if topic:
+        q = q.filter(CeoTickerRelationship.topic == topic)
+    if min_tightness > 0:
+        q = q.filter(CeoTickerRelationship.tightness_score >= min_tightness)
+    if min_samples > 0:
+        q = q.filter(CeoTickerRelationship.samples >= min_samples)
+    rows = q.order_by(CeoTickerRelationship.tightness_score.desc()).all()
+    return {
+        "status": "success",
+        "data": [
+            {
+                "ceo":               r.ceo,
+                "topic":             r.topic,
+                "ticker":            r.ticker,
+                "samples":           r.samples,
+                "hit_rate":          r.hit_rate,
+                "p_value":           r.p_value,
+                "avg_abs_move_pct":  r.avg_abs_move_pct,
+                "baseline_move_pct": r.baseline_move_pct,
+                "volatility_ratio":  r.volatility_ratio,
+                "tightness_score":   r.tightness_score,
+                "last_computed":     r.last_computed,
+            }
+            for r in rows
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Paper trading endpoints
+# ---------------------------------------------------------------------------
+
+class TradeRequest(BaseModel):
+    ceo: str
+    force_stale: bool = False   # override the 48h staleness guard
+
+@app.post("/api/trade/execute")
+def execute_paper_trade(req: TradeRequest, db: Session = Depends(get_db)):
+    """
+    Full execution flow:
+      1. Load latest tweet for CEO from DB
+      2. Staleness check (48h) — block unless force_stale=True
+      3. Classify tweet topic
+      4. Look up relationship registry for (CEO, topic) pairs above tightness threshold
+      5. Run ML model for the best-matched ticker
+      6. Confidence check (≥55%)
+      7. Position management — close opposite side before opening new
+      8. Place Alpaca paper order
+      9. Log to paper_trades
+    """
+    from datetime import timezone
+
+    ticker_for_ceo = HANDLE_TO_TICKER.get(req.ceo)
+    if not ticker_for_ceo:
+        raise HTTPException(404, f"Unknown CEO handle: {req.ceo}")
+
+    # 1. Latest tweet
+    record = (
+        db.query(MergedRecord)
+        .filter(MergedRecord.ceo == req.ceo)
+        .order_by(MergedRecord.date.desc())
+        .first()
+    )
+    if not record:
+        raise HTTPException(404, f"No stored tweets for {req.ceo} — run the pipeline first.")
+
+    tweet_text = record.tweet_text or ""
+    tweet_dt   = datetime.fromisoformat(record.date) if record.date else datetime.now()
+    if tweet_dt.tzinfo is None:
+        tweet_dt = tweet_dt.replace(tzinfo=timezone.utc)
+
+    # 2. Staleness check
+    age_hours = (datetime.now(timezone.utc) - tweet_dt).total_seconds() / 3600
+    if age_hours > STALENESS_HOURS and not req.force_stale:
+        return {
+            "status": "skipped",
+            "skip_reason": f"Latest tweet is {age_hours:.0f}h old (>{STALENESS_HOURS}h). "
+                           "Pass force_stale=true to trade anyway.",
+            "tweet_date": record.date,
+            "tweet_text": tweet_text[:200],
+        }
+
+    # 3. Topic classification
+    topic = get_tweet_topic(tweet_text, req.ceo)
+
+    # 4. Relationship registry — find best ticker for (ceo, topic)
+    rel_rows = (
+        db.query(CeoTickerRelationship)
+        .filter(
+            CeoTickerRelationship.ceo == req.ceo,
+            CeoTickerRelationship.topic == topic,
+            CeoTickerRelationship.tightness_score >= TIGHTNESS_THRESHOLD,
+        )
+        .order_by(CeoTickerRelationship.tightness_score.desc())
+        .all()
+    )
+
+    # Fall back to the CEO's own stock if no registered relationship exists
+    if rel_rows:
+        best_rel    = rel_rows[0]
+        ticker      = best_rel.ticker
+        tightness   = best_rel.tightness_score
+    else:
+        ticker    = ticker_for_ceo
+        tightness = None
+
+    # 5. Run ML model
+    tweet_row = {
+        "date":          tweet_dt,
+        "text":          tweet_text,
+        "sentiment":     float(record.sentiment_score or 0),
+        "finbert_score": record.finbert_score,
+        "likes":         int(record.likes or 0),
+        "retweet_count": int(record.retweet_count or 0),
+        "view_count":    int(record.view_count or 0),
+        "reply_count":   int(record.reply_count or 0),
+        "tweet_hour":    int(record.tweet_hour or 12),
+        "is_premarket":  int(record.is_premarket or 0),
+    }
+
+    end_dt   = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=60)
+    stocks_df = proc.get_stocks(ticker, start_date=start_dt, end_date=end_dt)
+    stocks_df = compute_technicals(stocks_df)
+
+    try:
+        result_df = predict_tweets(pd.DataFrame([tweet_row]), stocks_df, ticker=ticker)
+    except FileNotFoundError as e:
+        raise HTTPException(503, str(e))
+
+    if result_df.empty:
+        raise HTTPException(500, "Model returned no prediction.")
+
+    direction  = str(result_df.iloc[0]["predicted_direction"])
+    confidence = float(result_df.iloc[0]["confidence_pct"])
+
+    def _log_trade(status, side="none", alpaca_id=None, qty=None,
+                   skip_reason=None, error_msg=None):
+        db.add(PaperTrade(
+            timestamp           = datetime.now().isoformat(),
+            ceo                 = req.ceo,
+            tweet_text          = tweet_text[:500],
+            tweet_date          = record.date,
+            topic               = topic,
+            ticker              = ticker,
+            side                = side,
+            notional            = TRADE_NOTIONAL,
+            qty                 = qty,
+            predicted_direction = direction,
+            confidence_pct      = confidence,
+            sentiment_score     = float(record.sentiment_score or 0),
+            tightness_score     = tightness,
+            alpaca_order_id     = alpaca_id,
+            status              = status,
+            skip_reason         = skip_reason,
+            error_msg           = error_msg,
+        ))
+        db.commit()
+
+    # 6. Confidence check
+    if confidence < CONFIDENCE_THRESHOLD:
+        reason = f"Confidence {confidence:.1f}% below {CONFIDENCE_THRESHOLD}% threshold"
+        _log_trade("skipped", skip_reason=reason)
+        return {"status": "skipped", "skip_reason": reason,
+                "predicted_direction": direction, "confidence_pct": confidence,
+                "ticker": ticker, "topic": topic}
+
+    # 7. Position management
+    side = OrderSide.BUY if direction == "Up" else OrderSide.SELL
+    side_str = "buy" if direction == "Up" else "sell_short"
+
+    try:
+        positions = {p.symbol: p for p in _trading_client.get_all_positions()}
+        if ticker in positions:
+            existing = positions[ticker]
+            existing_side = str(existing.side).lower()
+            if (existing_side == "long"  and direction == "Up") or \
+               (existing_side == "short" and direction == "Down"):
+                reason = f"Already {existing_side} {ticker} — signal matches existing position"
+                _log_trade("skipped", skip_reason=reason)
+                return {"status": "skipped", "skip_reason": reason,
+                        "ticker": ticker, "direction": direction}
+            # Opposite side — close existing first
+            _trading_client.close_position(ticker)
+    except Exception as e:
+        _log_trade("error", error_msg=f"Position check failed: {e}")
+        raise HTTPException(500, f"Could not check/close existing position: {e}")
+
+    # 8. Place order
+    try:
+        if side == OrderSide.BUY:
+            order_req = MarketOrderRequest(
+                symbol=ticker, notional=TRADE_NOTIONAL,
+                side=side, time_in_force=TimeInForce.DAY,
+            )
+        else:
+            # Shorts require qty, not notional
+            current_price = (
+                float(stocks_df["close"].iloc[-1])
+                if not stocks_df.empty else 100.0
+            )
+            qty = max(1, int(TRADE_NOTIONAL / current_price))
+            order_req = MarketOrderRequest(
+                symbol=ticker, qty=qty,
+                side=side, time_in_force=TimeInForce.DAY,
+            )
+
+        order    = _trading_client.submit_order(order_req)
+        order_id = str(order.id)
+        filled_qty = float(order.qty) if getattr(order, "qty", None) else None
+
+        _log_trade("placed", side=side_str, alpaca_id=order_id, qty=filled_qty)
+        return {
+            "status":              "placed",
+            "order_id":            order_id,
+            "ticker":              ticker,
+            "side":                side_str,
+            "predicted_direction": direction,
+            "confidence_pct":      confidence,
+            "tightness_score":     tightness,
+            "topic":               topic,
+            "tweet_age_hours":     round(age_hours, 1),
+            "tweet_text":          tweet_text[:200],
+        }
+
+    except Exception as e:
+        _log_trade("error", side=side_str, error_msg=str(e))
+        raise HTTPException(500, f"Alpaca order failed: {e}")
+
+
+@app.get("/api/trade/portfolio")
+def get_paper_portfolio():
+    """Live paper account balance and open positions from Alpaca."""
+    try:
+        account   = _trading_client.get_account()
+        positions = _trading_client.get_all_positions()
+        return {
+            "status": "success",
+            "account": {
+                "portfolio_value":  float(account.portfolio_value),
+                "cash":             float(account.cash),
+                "equity":           float(account.equity),
+                "buying_power":     float(account.buying_power),
+                "unrealized_pl":    float(account.unrealized_pl),
+                "unrealized_plpc":  round(float(account.unrealized_plpc) * 100, 2),
+            },
+            "positions": [
+                {
+                    "symbol":          p.symbol,
+                    "qty":             float(p.qty),
+                    "side":            str(p.side),
+                    "avg_entry_price": float(p.avg_entry_price),
+                    "current_price":   float(p.current_price),
+                    "market_value":    float(p.market_value),
+                    "unrealized_pl":   float(p.unrealized_pl),
+                    "unrealized_plpc": round(float(p.unrealized_plpc) * 100, 2),
+                }
+                for p in positions
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Could not fetch portfolio: {e}")
+
+
+@app.get("/api/trade/history")
+def get_trade_history(limit: int = 100, db: Session = Depends(get_db)):
+    """Trade log from the paper_trades DB table."""
+    trades = (
+        db.query(PaperTrade)
+        .order_by(PaperTrade.timestamp.desc())
+        .limit(limit)
+        .all()
+    )
+    return {
+        "status": "success",
+        "data": [
+            {
+                "id":                  t.id,
+                "timestamp":           t.timestamp,
+                "ceo":                 t.ceo,
+                "tweet_text":          t.tweet_text,
+                "tweet_date":          t.tweet_date,
+                "topic":               t.topic,
+                "ticker":              t.ticker,
+                "side":                t.side,
+                "notional":            t.notional,
+                "qty":                 t.qty,
+                "predicted_direction": t.predicted_direction,
+                "confidence_pct":      t.confidence_pct,
+                "sentiment_score":     t.sentiment_score,
+                "tightness_score":     t.tightness_score,
+                "alpaca_order_id":     t.alpaca_order_id,
+                "status":              t.status,
+                "skip_reason":         t.skip_reason,
+                "error_msg":           t.error_msg,
+            }
+            for t in trades
+        ],
+    }
+
+
+@app.post("/api/relationships/refresh")
+def api_refresh_relationships():
+    """Trigger a fresh run of relationship_analysis.py in a background thread."""
+    import threading
+    from relationship_analysis import run as _run_analysis
+
+    def _run():
+        try:
+            _run_analysis()
+        except Exception as e:
+            logging.error("relationship refresh failed: %s", e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return {"status": "started", "message": "Relationship analysis running in background."}

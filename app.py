@@ -460,8 +460,8 @@ def weekend_shift(dt):
     return dt
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab_home, tab_explore, tab_analysis, tab_predict, tab_backtest, tab_guide = st.tabs([
-    "Overview", "Explore", "Analysis", "Predict", "Backtest", "Guide"
+tab_home, tab_explore, tab_analysis, tab_predict, tab_backtest, tab_influence, tab_paper, tab_guide = st.tabs([
+    "Overview", "Explore", "Analysis", "Predict", "Backtest", "Influence Map", "Paper Trading", "Guide"
 ])
 
 # ── OVERVIEW TAB ──────────────────────────────────────────────────────────────
@@ -2184,3 +2184,482 @@ with tab_guide:
       </div>
     </div>
     """)
+
+# ── PAPER TRADING TAB ────────────────────────────────────────────────────────
+with tab_paper:
+    st.markdown("### Paper Trading")
+    st.caption(
+        "Simulated trading driven by the ML model and the relationship registry. "
+        "$1,000 per trade · long + short · min 55% confidence · min 0.20 tightness."
+    )
+
+    # Lazy-load Alpaca credentials from secrets or env
+    def _get_alpaca_keys():
+        try:
+            return st.secrets["ALPACA_PAPER_API_KEY"], st.secrets["ALPACA_PAPER_SECRET_KEY"]
+        except Exception:
+            return os.getenv("ALPACA_PAPER_API_KEY", ""), os.getenv("ALPACA_PAPER_SECRET_KEY", "")
+
+    _paper_key, _paper_secret = _get_alpaca_keys()
+
+    if not _paper_key or not _paper_secret:
+        st.error(
+            "ALPACA_PAPER_API_KEY and ALPACA_PAPER_SECRET_KEY must be set in "
+            ".env or Streamlit secrets."
+        )
+        st.stop()
+
+    @st.cache_resource
+    def _get_trading_client():
+        from alpaca.trading.client import TradingClient
+        return TradingClient(_paper_key, _paper_secret, paper=True)
+
+    _tc = _get_trading_client()
+
+    # ── Account overview ──────────────────────────────────────────────────────
+    st.markdown("#### Account")
+    if st.button("Refresh", type="secondary", key="paper_refresh"):
+        st.cache_data.clear()
+
+    try:
+        _acct = _tc.get_account()
+        _pv   = float(_acct.portfolio_value)
+        _cash = float(_acct.cash)
+        _upl  = float(_acct.unrealized_pl)
+        _bp   = float(_acct.buying_power)
+        _start_val = 100_000.0   # Alpaca paper starts at $100k
+
+        pa1, pa2, pa3, pa4, pa5 = st.columns(5)
+        pa1.metric("Portfolio Value",  f"${_pv:,.2f}",
+                   f"{(_pv - _start_val) / _start_val * 100:+.2f}% vs start")
+        pa2.metric("Cash",             f"${_cash:,.2f}")
+        pa3.metric("Unrealized P&L",   f"${_upl:+,.2f}")
+        pa4.metric("Buying Power",     f"${_bp:,.2f}")
+        pa5.metric("Equity",           f"${float(_acct.equity):,.2f}")
+    except Exception as _e:
+        st.error(f"Could not load Alpaca account: {_e}")
+
+    # ── Open positions ────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Open Positions")
+    try:
+        _positions = _tc.get_all_positions()
+        if _positions:
+            _pos_data = []
+            for _p in _positions:
+                _pl_pct = round(float(_p.unrealized_plpc) * 100, 2)
+                _pos_data.append({
+                    "Symbol":        _p.symbol,
+                    "Side":          str(_p.side).capitalize(),
+                    "Qty":           float(_p.qty),
+                    "Entry Price":   f"${float(_p.avg_entry_price):.2f}",
+                    "Current Price": f"${float(_p.current_price):.2f}",
+                    "Market Value":  f"${float(_p.market_value):,.2f}",
+                    "Unrealized P&L":f"${float(_p.unrealized_pl):+,.2f}",
+                    "P&L %":         f"{_pl_pct:+.2f}%",
+                })
+            st.dataframe(pd.DataFrame(_pos_data), use_container_width=True)
+        else:
+            st.info("No open positions.")
+    except Exception as _e:
+        st.error(f"Could not load positions: {_e}")
+
+    # ── Execute trade ─────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Execute Trade")
+    st.caption(
+        "Selects the best ticker from the relationship registry for this CEO's latest tweet topic. "
+        "Falls back to their own stock if no registered relationship exists."
+    )
+
+    _sorted_ceos  = sorted(CEO_DATA.items(), key=lambda x: x[1]["name"])
+    _exec_ceo_sel = st.selectbox(
+        "CEO",
+        _sorted_ceos,
+        format_func=lambda x: f"{x[1]['name']}  —  {x[1]['ticker']}",
+        key="paper_exec_ceo",
+    )
+    _exec_handle = _exec_ceo_sel[0]
+
+    _force_stale = st.checkbox(
+        "Trade even if latest tweet is older than 48h",
+        value=False,
+        key="paper_force_stale",
+    )
+
+    _run_trade = st.button("Predict & Trade", type="primary",
+                           use_container_width=False, key="paper_trade_btn")
+
+    if _run_trade:
+        with st.spinner("Running pipeline..."):
+            try:
+                import requests as _req
+                _api_url = os.getenv("API_URL", "http://localhost:8000")
+                _resp = _req.post(
+                    f"{_api_url}/api/trade/execute",
+                    json={"ceo": _exec_handle, "force_stale": _force_stale},
+                    timeout=60,
+                )
+                _result = _resp.json()
+            except Exception as _e:
+                st.error(f"Could not reach API: {_e}")
+                _result = None
+
+        if _result:
+            _status = _result.get("status")
+
+            if _status == "placed":
+                st.success(
+                    f"Trade placed!  "
+                    f"**{_result['side'].upper()}** ${1000:,.0f} of "
+                    f"**{_result['ticker']}**  ·  "
+                    f"Prediction: {_result['predicted_direction']}  ·  "
+                    f"Confidence: {_result['confidence_pct']:.1f}%"
+                )
+                _tc1, _tc2, _tc3, _tc4 = st.columns(4)
+                _tc1.metric("Ticker",      _result["ticker"])
+                _tc2.metric("Direction",   _result["predicted_direction"])
+                _tc3.metric("Confidence",  f"{_result['confidence_pct']:.1f}%")
+                _tc4.metric("Topic",       _result.get("topic", "—"))
+
+                if _result.get("tightness_score") is not None:
+                    st.caption(
+                        f"Relationship tightness score: **{_result['tightness_score']:.3f}**  ·  "
+                        f"Tweet age: **{_result.get('tweet_age_hours', '?'):.0f}h**  ·  "
+                        f"Order ID: `{_result['order_id']}`"
+                    )
+                if _result.get("tweet_text"):
+                    st.info(f'Signal tweet: "{_result["tweet_text"][:160]}"')
+
+            elif _status == "skipped":
+                st.warning(f"Trade skipped — {_result.get('skip_reason', '')}")
+                if _result.get("predicted_direction"):
+                    st.caption(
+                        f"Model said: {_result['predicted_direction']}  ·  "
+                        f"Confidence: {_result.get('confidence_pct', 0):.1f}%"
+                    )
+
+            else:
+                st.error(f"Error: {_result.get('detail', _result)}")
+
+    # ── Trade history ─────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### Trade History")
+
+    @st.cache_data(ttl=30)
+    def _load_paper_trades():
+        _url = _get_db_url()
+        if not _url:
+            return pd.DataFrame()
+        try:
+            _conn = psycopg2.connect(_url)
+            _df = pd.read_sql_query(
+                """
+                SELECT timestamp, ceo, topic, ticker, side, predicted_direction,
+                       confidence_pct, sentiment_score, tightness_score,
+                       notional, qty, status, skip_reason, error_msg,
+                       tweet_date, tweet_text
+                FROM paper_trades
+                ORDER BY timestamp DESC
+                LIMIT 200
+                """,
+                _conn,
+            )
+            _conn.close()
+            return _df
+        except Exception:
+            return pd.DataFrame()
+
+    _hist = _load_paper_trades()
+
+    if _hist.empty:
+        st.info("No trades yet — execute your first trade above.")
+    else:
+        _placed      = (_hist["status"] == "placed").sum()
+        _skipped     = (_hist["status"] == "skipped").sum()
+        _errors      = (_hist["status"] == "error").sum()
+        _up_trades   = ((_hist["status"] == "placed") & (_hist["predicted_direction"] == "Up")).sum()
+        _down_trades = ((_hist["status"] == "placed") & (_hist["predicted_direction"] == "Down")).sum()
+
+        ht1, ht2, ht3, ht4, ht5, ht6 = st.columns(6)
+        ht1.metric("Signals",  len(_hist))
+        ht2.metric("Placed",   _placed)
+        ht3.metric("Skipped",  _skipped)
+        ht4.metric("Errors",   _errors)
+        ht5.metric("Longs",    _up_trades)
+        ht6.metric("Shorts",   _down_trades)
+
+        # Colour-code rows by status
+        _show_hist = _hist[[
+            "timestamp", "ceo", "topic", "ticker", "side",
+            "predicted_direction", "confidence_pct", "tightness_score",
+            "status", "skip_reason",
+        ]].copy()
+        _show_hist["timestamp"] = _show_hist["timestamp"].str[:19]
+        _show_hist["ceo"] = _show_hist["ceo"].map(
+            lambda h: CEO_DATA.get(h, {}).get("name", h)
+        )
+        _show_hist["confidence_pct"] = _show_hist["confidence_pct"].round(1)
+        _show_hist["tightness_score"] = _show_hist["tightness_score"].round(3)
+
+        def _status_color(val):
+            if val == "placed":  return "color: #26a69a; font-weight: bold"
+            if val == "error":   return "color: #ef5350; font-weight: bold"
+            return "color: #8a9bbf"
+
+        st.dataframe(
+            _show_hist.style.map(_status_color, subset=["status"]),
+            use_container_width=True,
+            height=380,
+        )
+
+        # Expand a single trade to see the full tweet
+        if st.checkbox("Show full tweet text for latest trade", key="paper_show_tweet"):
+            _latest = _hist.iloc[0]
+            st.markdown(f"**{_latest['timestamp'][:19]}** — "
+                        f"{CEO_DATA.get(_latest['ceo'], {}).get('name', _latest['ceo'])} "
+                        f"→ {_latest['ticker']} ({_latest['topic']})")
+            st.info(f'"{_latest["tweet_text"]}"' if _latest.get("tweet_text") else "No tweet text stored.")
+            st.caption(f"Tweet date: {_latest.get('tweet_date', '—')}")
+
+
+# ── INFLUENCE MAP TAB ─────────────────────────────────────────────────────────
+with tab_influence:
+    st.markdown("### Influence Map")
+    st.markdown(
+        "Which CEO tweets actually move which stocks — and how consistently? "
+        "Each row is a validated causal relationship. Run `python3 relationship_analysis.py` "
+        "to compute or refresh scores."
+    )
+
+    @st.cache_data(ttl=120)
+    def _load_relationships():
+        url = _get_db_url()
+        if not url:
+            return pd.DataFrame()
+        try:
+            conn = psycopg2.connect(url)
+            df = pd.read_sql_query(
+                """
+                SELECT ceo, topic, ticker, samples, hit_rate, p_value,
+                       avg_abs_move_pct, baseline_move_pct, volatility_ratio,
+                       tightness_score, last_computed
+                FROM ceo_ticker_relationships
+                ORDER BY tightness_score DESC
+                """,
+                conn,
+            )
+            conn.close()
+            return df
+        except Exception:
+            return pd.DataFrame()
+
+    rel_df = _load_relationships()
+
+    if rel_df.empty:
+        st.info(
+            "No relationship data yet. Run `python3 relationship_analysis.py` from the project "
+            "directory to compute relationships from your stored tweets."
+        )
+    else:
+        # ── Summary strip ────────────────────────────────────────────────────
+        total_rel  = len(rel_df)
+        strong_rel = (rel_df["tightness_score"] >= 0.35).sum()
+        top_row    = rel_df.iloc[0]
+        top_ceo_name = CEO_DATA.get(top_row["ceo"], {}).get("name", top_row["ceo"])
+
+        r1, r2, r3, r4 = st.columns(4)
+        r1.metric("Relationships tested", f"{total_rel:,}")
+        r2.metric("Strong (score ≥ 0.35)", str(strong_rel))
+        r3.metric("Tightest relationship",
+                  f"{top_ceo_name} → {top_row['ticker']}",
+                  f"{top_row['tightness_score']:.3f}")
+        r4.metric("Topics covered",
+                  str(rel_df["topic"].nunique()))
+
+        st.markdown("---")
+
+        # ── Filters ──────────────────────────────────────────────────────────
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        with fc1:
+            ceo_opts = ["All"] + sorted(rel_df["ceo"].unique().tolist())
+            sel_ceo = st.selectbox("CEO", ceo_opts, key="inf_ceo")
+        with fc2:
+            topic_opts = ["All"] + sorted(rel_df["topic"].unique().tolist())
+            sel_topic = st.selectbox("Topic", topic_opts, key="inf_topic")
+        with fc3:
+            min_tight = st.slider("Min tightness score", 0.0, 1.0, 0.0, 0.05,
+                                  key="inf_tight")
+        with fc4:
+            min_samp = st.slider("Min samples", 1, 50, 1, key="inf_samples")
+
+        filt = rel_df.copy()
+        if sel_ceo != "All":
+            filt = filt[filt["ceo"] == sel_ceo]
+        if sel_topic != "All":
+            filt = filt[filt["topic"] == sel_topic]
+        filt = filt[filt["tightness_score"] >= min_tight]
+        filt = filt[filt["samples"] >= min_samp]
+
+        st.caption(f"{len(filt)} relationships shown")
+
+        # ── Heatmap: CEO × ticker, colour = tightness score ─────────────────
+        st.markdown("#### Tightness Heatmap")
+        st.caption("Colour = tightness score (0 = no relationship, 1 = very tight). "
+                   "Only shows rows with score > 0.")
+
+        hm_data = filt[filt["tightness_score"] > 0].copy()
+        if not hm_data.empty:
+            hm_data["ceo_label"] = hm_data["ceo"].map(
+                lambda h: CEO_DATA.get(h, {}).get("name", h)
+            )
+            pivot = hm_data.pivot_table(
+                index="ceo_label", columns="ticker",
+                values="tightness_score", aggfunc="max"
+            ).fillna(0)
+
+            fig_hm = go.Figure(go.Heatmap(
+                z=pivot.values,
+                x=pivot.columns.tolist(),
+                y=pivot.index.tolist(),
+                colorscale=[
+                    [0.0,  "#12161f"],
+                    [0.01, "#1a2a1a"],
+                    [0.3,  "#1e4620"],
+                    [0.6,  "#2e7d32"],
+                    [0.8,  "#43a047"],
+                    [1.0,  "#00e676"],
+                ],
+                zmin=0, zmax=1,
+                colorbar=dict(title="Tightness", tickformat=".2f"),
+                hovertemplate="<b>%{y}</b> → %{x}<br>Tightness: %{z:.3f}<extra></extra>",
+            ))
+            fig_hm.update_layout(
+                height=max(300, len(pivot) * 28),
+                template="plotly_dark",
+                paper_bgcolor="#1a1f2e",
+                plot_bgcolor="#1a1f2e",
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis=dict(tickangle=-35),
+            )
+            st.plotly_chart(fig_hm, use_container_width=True)
+        else:
+            st.info("No relationships with tightness > 0 match your filters.")
+
+        # ── Ranked table ─────────────────────────────────────────────────────
+        st.markdown("#### All Relationships (ranked)")
+
+        display = filt.copy()
+        display["ceo_name"] = display["ceo"].map(
+            lambda h: CEO_DATA.get(h, {}).get("name", h)
+        )
+        display["hit_rate_%"]      = (display["hit_rate"] * 100).round(1)
+        display["vol_ratio"]       = display["volatility_ratio"].round(2)
+        display["avg_move_%"]      = display["avg_abs_move_pct"].round(3)
+        display["baseline_move_%"] = display["baseline_move_pct"].round(3)
+
+        show_cols = {
+            "ceo_name":        "CEO",
+            "topic":           "Topic",
+            "ticker":          "Ticker",
+            "samples":         "Samples",
+            "hit_rate_%":      "Hit Rate %",
+            "p_value":         "p-value",
+            "avg_move_%":      "Avg Move % (tweet days)",
+            "baseline_move_%": "Avg Move % (other days)",
+            "vol_ratio":       "Volatility Ratio",
+            "tightness_score": "Tightness Score",
+        }
+        st.dataframe(
+            display[[c for c in show_cols]].rename(columns=show_cols),
+            use_container_width=True,
+            height=420,
+        )
+
+        # ── Drill-down: pick one relationship and see the raw tweet evidence ─
+        st.markdown("---")
+        st.markdown("#### Drill-down — inspect the evidence for one relationship")
+
+        if not filt.empty:
+            rel_opts = [
+                f"{CEO_DATA.get(r.ceo, {}).get('name', r.ceo)}  ·  {r.topic}  →  {r.ticker}  "
+                f"(score {r.tightness_score:.3f})"
+                for r in filt.itertuples()
+            ]
+            sel_rel_idx = st.selectbox("Select relationship", range(len(rel_opts)),
+                                       format_func=lambda i: rel_opts[i],
+                                       key="inf_drill")
+            sel_rel = filt.iloc[sel_rel_idx]
+
+            d1, d2, d3, d4, d5 = st.columns(5)
+            d1.metric("Samples",         sel_rel["samples"])
+            d2.metric("Hit Rate",        f"{sel_rel['hit_rate']*100:.1f}%")
+            d3.metric("p-value",         f"{sel_rel['p_value']:.4f}")
+            d4.metric("Volatility Ratio",f"{sel_rel['volatility_ratio']:.2f}x")
+            d5.metric("Tightness Score", f"{sel_rel['tightness_score']:.3f}")
+
+            if sel_rel["p_value"] < 0.05:
+                st.success(f"Statistically significant at p < 0.05 — this relationship is unlikely to be random noise.")
+            elif sel_rel["p_value"] < 0.15:
+                st.warning(f"Marginally significant (p = {sel_rel['p_value']:.3f}) — suggestive but needs more data.")
+            else:
+                st.error(f"Not statistically significant (p = {sel_rel['p_value']:.3f}) — may be noise.")
+
+            # Show the actual tweets that drove this relationship
+            url = _get_db_url()
+            if url:
+                try:
+                    conn = psycopg2.connect(url)
+                    evidence_df = pd.read_sql_query(
+                        """
+                        SELECT date, tweet_text, sentiment_score, finbert_score,
+                               next_day_direction, likes, retweet_count
+                        FROM merged_data
+                        WHERE ceo = %s
+                          AND next_day_direction IS NOT NULL
+                        ORDER BY date DESC
+                        LIMIT 200
+                        """,
+                        conn,
+                        params=[sel_rel["ceo"]],
+                    )
+                    conn.close()
+
+                    from classifier import get_tweet_topic as _get_topic
+                    evidence_df["topic"] = evidence_df.apply(
+                        lambda r: _get_topic(str(r["tweet_text"]), sel_rel["ceo"]),
+                        axis=1,
+                    )
+                    evidence_df = evidence_df[evidence_df["topic"] == sel_rel["topic"]].copy()
+
+                    if evidence_df.empty:
+                        st.info("No matching tweets found for this topic filter.")
+                    else:
+                        evidence_df["direction"] = evidence_df["next_day_direction"].map(
+                            {1: "↑ Up", 0: "↓ Down"}
+                        )
+                        evidence_df["sentiment_dir"] = evidence_df["sentiment_score"].apply(
+                            lambda s: "+" if s > 0 else ("-" if s < 0 else "0")
+                        )
+                        evidence_df["correct"] = evidence_df.apply(
+                            lambda r: "✓" if (
+                                (r["sentiment_score"] > 0 and r["next_day_direction"] == 1) or
+                                (r["sentiment_score"] < 0 and r["next_day_direction"] == 0)
+                            ) else "✗",
+                            axis=1,
+                        )
+                        show_ev = evidence_df[[
+                            "date", "tweet_text", "sentiment_score",
+                            "finbert_score", "sentiment_dir",
+                            "direction", "correct", "likes",
+                        ]].copy()
+                        show_ev["tweet_text"] = show_ev["tweet_text"].str[:120]
+                        show_ev["date"] = show_ev["date"].astype(str).str[:10]
+                        st.caption(
+                            f"{len(show_ev)} topic-matched tweets · "
+                            f"{(show_ev['correct'] == '✓').sum()} correct "
+                            f"({(show_ev['correct'] == '✓').mean():.0%} hit rate on this sample)"
+                        )
+                        st.dataframe(show_ev, use_container_width=True, height=320)
+                except Exception as e:
+                    st.error(f"Could not load tweet evidence: {e}")

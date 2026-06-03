@@ -1,7 +1,7 @@
 services:
   - type: web
     name: moneymaker-api
-    env: python
+    runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn main:app --workers 1 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:$PORT --timeout 120
@@ -12,6 +12,10 @@ services:
         sync: false
       - key: ALPACA_SECRET_KEY
         sync: false
+      - key: ALPACA_PAPER_API_KEY
+        sync: false
+      - key: ALPACA_PAPER_SECRET_KEY
+        sync: false
       - key: FINNHUB_API_KEY
         sync: false
       - key: ALPHA_VANTAGE_API_KEY
@@ -19,12 +23,38 @@ services:
 
   - type: web
     name: moneymaker-ui
-    env: python
+    runtime: python
     plan: free
     buildCommand: pip install -r requirements-ui.txt
     startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
     envVars:
       - key: API_BASE_URL
+        sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: ALPHA_VANTAGE_API_KEY
+        sync: false
+
+  # Always-on tweet watcher — polls every 20 min during market hours,
+  # 60 min pre/post market, 4 hours overnight. Queues signals found outside
+  # market hours and executes them at next open.
+  # Requires at least the Starter plan on Render.
+  - type: worker
+    name: tweet-watcher
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 watch.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: ALPACA_PAPER_API_KEY
+        sync: false
+      - key: ALPACA_PAPER_SECRET_KEY
         sync: false
       - key: FINNHUB_API_KEY
         sync: false
