@@ -1,0 +1,53 @@
+name: Market Watcher
+
+on:
+  schedule:
+    # Every 20 minutes, Mon–Fri, 13:00–21:00 UTC
+    # Covers NYSE market hours (9:30am–4pm ET) in both EST and EDT
+    - cron: '0,20,40 13-21 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (evaluate signals but do not place orders)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+jobs:
+  watch:
+    name: Evaluate signals and trade
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements-watcher.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-watcher.txt
+
+      - name: Run watcher (DB-only mode)
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            python3 watch.py --once --db-only --dry-run
+          else
+            python3 watch.py --once --db-only
+          fi
+        env:
+          DATABASE_URL:             ${{ secrets.DATABASE_URL }}
+          ALPACA_API_KEY:           ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY:        ${{ secrets.ALPACA_SECRET_KEY }}
+          ALPACA_PAPER_API_KEY:     ${{ secrets.ALPACA_PAPER_API_KEY }}
+          ALPACA_PAPER_SECRET_KEY:  ${{ secrets.ALPACA_PAPER_SECRET_KEY }}
+          FINNHUB_API_KEY:          ${{ secrets.FINNHUB_API_KEY }}
+          ALPHA_VANTAGE_API_KEY:    ${{ secrets.ALPHA_VANTAGE_API_KEY }}

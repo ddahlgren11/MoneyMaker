@@ -1,0 +1,16 @@
+pandas
+python-dotenv
+sqlalchemy
+psycopg2-binary
+alpaca-py
+yfinance
+vaderSentiment
+scikit-learn
+joblib
+numpy
+requests
+pytz
+tzdata
+scipy
+tweety-ns
+textblob
