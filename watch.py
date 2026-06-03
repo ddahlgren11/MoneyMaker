@@ -565,7 +565,9 @@ def poll_from_db(ceo_list: list[str], dry_run: bool):
                 if last_seen:
                     if last_seen.tzinfo is None:
                         last_seen = last_seen.replace(tzinfo=timezone.utc)
-                    query_params["since"] = last_seen
+                    # date column is VARCHAR — cast both sides via ISO string so
+                    # PostgreSQL can compare them without a type mismatch
+                    query_params["since"] = last_seen.strftime("%Y-%m-%dT%H:%M:%S")
                     rows = db.execute(
                         text("""
                             SELECT date, tweet_text, sentiment_score, finbert_score,
@@ -665,6 +667,7 @@ def poll_from_db(ceo_list: list[str], dry_run: bool):
 
             except Exception as e:
                 log.warning("  Error processing %s: %s", ceo, e)
+                db.rollback()   # reset aborted transaction so next CEO can query cleanly
                 continue
 
         db.commit()
