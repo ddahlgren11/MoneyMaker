@@ -1,0 +1,107 @@
+handle,name,category,notes
+BillAckman,Bill Ackman,activist_investor,Pershing Square - tweets positions explicitly and moves stocks immediately
+Carl_C_Icahn,Carl Icahn,activist_investor,Icahn Enterprises - known to tweet about target companies
+DanLoeb,Dan Loeb,activist_investor,Third Point - activist campaigns in tech and consumer
+JeffSmith_Starboard,Jeff Smith,activist_investor,Starboard Value - activist campaigns
+ValueAct,ValueAct Capital,activist_investor,Institutional activist - tech and healthcare focus
+Michael_Saylor,Michael Saylor,crypto,MicroStrategy CEO - buys Bitcoin publicly - highest signal crypto account
+cz_binance,CZ,crypto,Binance founder - largest crypto exchange - major market mover
+VitalikButerin,Vitalik Buterin,crypto,Ethereum co-founder - ETH price sensitive to his posts
+APompliano,Anthony Pompliano,crypto,Bitcoin bull - large following - consistent crypto signal
+tyler,Tyler Winklevoss,crypto,Gemini co-founder - Bitcoin maximalist
+cameron,Cameron Winklevoss,crypto,Gemini co-founder - Bitcoin maximalist
+PeterSchiff,Peter Schiff,crypto,Gold bull Bitcoin bear - contrarian signal on crypto
+nic__carter,Nic Carter,crypto,Castle Island Ventures - thoughtful crypto analysis
+RayDalio,Ray Dalio,macro,Bridgewater founder - macro views move markets briefly
+paultudorjones,Paul Tudor Jones,macro,PTJ Capital - respected macro trader
+JeffGundlach,Jeffrey Gundlach,macro,DoubleLine - bond king - interest rate calls
+larry_summers,Larry Summers,macro,Former Treasury Secretary - policy and rates commentary
+LHSummers,Lawrence Summers,macro,Academic account - same as above if primary inactive
+nouriel,Nouriel Roubini,macro,Dr Doom - bearish - contrarian signal when he panics
+austan_goolsbee,Austan Goolsbee,macro,Chicago Fed president - policy signals
+NickTimiraos,Nick Timiraos,macro,WSJ Fed reporter - known as Fed whisperer - rate signals
+ReformedBroker,Josh Brown,media,Ritholtz Wealth - daily market commentary large following
+ritholtz,Barry Ritholtz,media,Ritholtz Wealth - market commentary
+jimcramer,Jim Cramer,media,CNBC Mad Money - famous contrarian indicator
+HowardLindzon,Howard Lindzon,media,StockTwits founder - market sentiment pulse
+morganbrennan,Morgan Brennan,media,CNBC reporter - breaking market news
+ScottWapner,Scott Wapner,media,CNBC Fast Money - often breaks institutional moves
+HindenburgRes,Hindenburg Research,short_seller,Nate Anderson - short reports immediately move stocks hard
+muddywaters,Muddy Waters Research,short_seller,Carson Block - Asia-focused short seller
+CitronResearch,Citron Research,short_seller,Andrew Left - short reports with immediate price impact
+GothamResearch,Gotham City Research,short_seller,Short research firm - biotech and tech
+PrestigeEconom1,Spruce Point Capital,short_seller,Ben Axler - forensic short research
+DanIves,Dan Ives,analyst,Wedbush tech analyst - Apple and EV calls closely followed
+GaryBlackNYC,Gary Black,analyst,NextGen Vehicles fund - tweets constantly about Tesla data
+MinaYousif,Mina Yousif,analyst,EV analyst - strong sector following
+benedictevans,Benedict Evans,analyst,Independent tech analyst - strategy and market structure
+tomgara,Tom Gara,analyst,Wall Street Journal - breaking tech business news
+sama,Sam Altman,tech_executive,OpenAI CEO - AI industry signals - high engagement
+karpathy,Andrej Karpathy,tech_executive,Former Tesla AI director - AI and EV signals
+GaryMarcus,Gary Marcus,tech_executive,AI researcher - often bearish on AI hype
+ylecun,Yann LeCun,tech_executive,Meta chief AI scientist - AI direction signals
+fchollet,Francois Chollet,tech_executive,Google AI researcher - AI benchmark and capability signals
+emollick,Ethan Mollick,tech_executive,Wharton AI professor - AI adoption signals
+zuck,Mark Zuckerberg,tech_executive,Meta CEO - product and business signals
+jonyivegroupie,Jony Ive,tech_executive,Former Apple designer - Apple product signals
+BobIger,Robert Iger,tech_executive,Disney CEO - already tracked as RobertIger
+Piyasena,Elon Musk,tech_executive,Already tracked as elonmusk
+naval,Naval Ravikant,investor,AngelList founder - tech and crypto sentiment
+paulg,Paul Graham,investor,YCombinator - startup and tech signals
+Jason,Jason Calacanis,investor,LAUNCH fund - tech startup signals
+chamath,Chamath Palihapitiya,investor,Social Capital - vocal about positions - SPAC king
+david_sacks,David Sacks,investor,Craft Ventures - tech policy and AI signals
+pmarca,Marc Andreessen,investor,a16z - tech and policy signals
+bgurley,Bill Gurley,investor,Benchmark - IPO and tech market signals
+GavinsBaker,Gavin Baker,investor,Atreides Management - tech fund
+jtrades,Josh Young,investor,Bison Interests - energy focused
+PeterLBrandt,Peter Brandt,trader,Veteran commodity and crypto chart trader
+TuurDemeester,Tuur Demeester,crypto,Bitcoin research - longer term crypto signals
+woonomic,Willy Woo,crypto,Bitcoin on-chain analyst
+100trillionusd,PlanB,crypto,Bitcoin S2F model creator
+DocumentingBTC,DocumentingBitcoin,crypto,Bitcoin news aggregator
+WClementeIII,Will Clemente,crypto,Bitcoin on-chain data
+IncomeSharks,IncomeSharks,trader,Options flow and unusual activity
+FlowAlgo,FlowAlgo,trader,Options order flow signals
+unusual_whales,Unusual Whales,trader,Options and congressional trade tracker
+spotgamma,SpotGamma,trader,Options gamma exposure - market structure signals
+dharmatrader,Larry Williams,trader,Veteran futures trader
+TBradford_SF,Todd Bradford,trader,Macro and options commentary
+TastyTrade,tastyworks,trader,Options education - retail sentiment gauge
+MarketWatch,MarketWatch,media,Breaking financial news
+WSJmarkets,WSJ Markets,media,Wall Street Journal markets desk
+FT,Financial Times,media,Breaking global financial news
+markets,Bloomberg Markets,media,Bloomberg breaking markets
+FortuneMagazine,Fortune,media,Business news and CEO profiles
+Convertbond,Convertbond,analyst,Convertible bond market - credit signals
+creditstrategy,Credit Strategy,analyst,Credit market analyst
+LizAnnSonders,Liz Ann Sonders,analyst,Schwab chief investment strategist
+MikeWilsonMS,Mike Wilson,analyst,Morgan Stanley chief equity strategist - bearish calls
+TomLeeETF,Tom Lee,analyst,Fundstrat - bullish market strategist
+demarco_joe,Joe DeMarco,analyst,Technical analyst
+Macro_Alf,Alfonso Peccatiello,macro,The Macro Compass - rates and macro
+MacroVoices,MacroVoices,macro,Macro podcast - institutional macro commentary
+hkuppy,Harris Kupperman,macro,Praetorian Capital - commodity and macro trader
+quant_arb,Quantitative Arbitrage,trader,Quant strategies commentary
+OnePlus2020,Mark Minervini,trader,US Investing Championship winner - momentum trader
+Invest_Foresight,Wayne Himelsein,trader,Logica Funds - volatility strategies
+zerohedge,ZeroHedge,media,Often first on breaking financial stress news
+TruthGundlach,Jeffrey Gundlach alt,macro,Secondary Gundlach account
+KobeissiLetter,The Kobeissi Letter,analyst,Capital markets analysis newsletter
+KantarCNBC,Ylan Mui,media,CNBC Fed reporter - policy signals
+GRDecter,Guy Adami,media,Fast Money CNBC trader
+KaraSwisher,Kara Swisher,media,Tech journalist - breaking tech CEO news
+benedictevans,Benedict Evans,analyst,Already listed above
+WalterBloomberg,Walter Bloomberg,media,Bloomberg headline aggregator - instant news
+lisaabramowicz1,Lisa Abramowicz,media,Bloomberg - credit and rates commentary
+tracyalloway,Tracy Alloway,media,Bloomberg Odd Lots - market structure
+TheStalwart,Joe Weisenthal,media,Bloomberg Odd Lots co-host
+JohnStossel,John Stossel,media,Skip - political not financial
+pete_najarian,Pete Najarian,trader,Options unusual activity spotter
+jonjonah,Jon Najarian,trader,Options unusual activity - market maker insights
+JimBianco,Jim Bianco,macro,Bianco Research - rates and macro
+danmangan,Dan Mangan,media,CNBC reporter
+RobertKiyosaki,Robert Kiyosaki,investor,Rich Dad Poor Dad - gold and crypto sentiment
+mikenovogratz,Mike Novogratz,crypto,Galaxy Digital CEO - institutional crypto
+GrayscaleBTC,Grayscale,crypto,Bitcoin trust - institutional crypto flows
+coinbasedevs,Coinbase,tech_executive,Already tracked as brian_armstrong
