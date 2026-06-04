@@ -408,12 +408,20 @@ def evaluate_tweet(row: pd.Series, ceo: str, db) -> dict | None:
     if not ticker:
         return None
 
-    # ML prediction
-    end_dt    = datetime.now(timezone.utc)
-    start_dt  = end_dt - timedelta(days=60)
-    proc      = DataProcessor()
-    stocks_df = proc.get_stocks(ticker, start_date=start_dt, end_date=end_dt)
-    stocks_df = compute_technicals(stocks_df)
+    # ML prediction — fetch technicals, fall back to empty DF if data API is
+    # unavailable (e.g. GitHub Actions). Model imputes RSI/ATR with training medians.
+    end_dt   = datetime.now(timezone.utc)
+    start_dt = end_dt - timedelta(days=60)
+    try:
+        proc      = DataProcessor()
+        stocks_df = proc.get_stocks(ticker, start_date=start_dt, end_date=end_dt)
+        stocks_df = compute_technicals(stocks_df)
+    except Exception as _stock_err:
+        log.debug("  Stock data unavailable for %s (%s) — using empty DF", ticker, _stock_err)
+        stocks_df = pd.DataFrame(
+            columns=["date_only", "close", "open", "high", "low",
+                     "volume", "rsi_14", "atr_14"]
+        )
 
     dt = pd.to_datetime(tweet_date)
     if dt.tzinfo is None:
