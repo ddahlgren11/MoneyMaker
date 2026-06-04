@@ -2,7 +2,7 @@ name: Weekly Relationship Registry Refresh
 
 on:
   schedule:
-    - cron: '30 12 * * 1'  # Monday 8:30am ET (12:30 UTC) — after daily retrain finishes
+    - cron: '0 14 * * 1'   # Monday 9:00am ET (14:00 UTC) — after daily retrain finishes (~30 min buffer)
   workflow_dispatch:        # allow manual trigger from GitHub UI
 
 jobs:
