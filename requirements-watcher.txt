@@ -5,7 +5,7 @@ psycopg2-binary
 alpaca-py
 yfinance
 vaderSentiment
-scikit-learn
+scikit-learn==1.8.0
 joblib
 numpy
 requests
