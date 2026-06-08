@@ -319,10 +319,17 @@ def place_order(ticker: str, direction: str, dry_run: bool) -> str | None:
             side=side, time_in_force=TimeInForce.DAY,
         )
     else:
-        proc = DataProcessor()
-        end_dt   = datetime.now(timezone.utc)
-        stocks   = proc.get_stocks(ticker, start_date=end_dt - timedelta(days=5), end_date=end_dt)
-        price    = float(stocks["close"].iloc[-1]) if not stocks.empty else 100.0
+        # Shorts need qty not notional — use yfinance for price (no auth needed)
+        try:
+            import yfinance as _yf
+            _df = _yf.download(ticker, period="2d", auto_adjust=True, progress=False)
+            if isinstance(_df.columns, pd.MultiIndex):
+                _df.columns = [str(c[0]).lower() for c in _df.columns]
+            else:
+                _df.columns = [str(c).lower() for c in _df.columns]
+            price = float(_df["close"].iloc[-1]) if not _df.empty else 100.0
+        except Exception:
+            price = 100.0
         order_req = MarketOrderRequest(
             symbol=ticker, qty=max(1, int(TRADE_NOTIONAL / price)),
             side=side, time_in_force=TimeInForce.DAY,

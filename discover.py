@@ -32,6 +32,7 @@ import csv
 import logging
 import os
 import time
+import time
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -41,6 +42,7 @@ from dotenv import load_dotenv
 from scipy.stats import binomtest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 load_dotenv()
 
@@ -61,7 +63,7 @@ MIN_TEXT_LEN        = 15
 ENGAGEMENT_PCTILE   = 0.25
 
 PAGE_DELAY_S        = 3.0    # seconds between page fetches (rate limit safety)
-ACCOUNT_DELAY_S     = 45.0   # seconds between accounts
+ACCOUNT_DELAY_S     = 90.0   # seconds between accounts
 BACKOFF_BASE_S      = 10.0   # starting backoff on error
 MAX_RETRIES         = 3
 
@@ -117,7 +119,10 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-engine  = create_engine(DATABASE_URL, pool_pre_ping=True, pool_recycle=300)
+# NullPool creates a fresh connection per operation — no stale connections
+# after Neon's serverless idle timeout (5 min). Slightly higher overhead per
+# query but essential for long-running scripts with large gaps between DB calls.
+engine  = create_engine(DATABASE_URL, poolclass=NullPool)
 Session = sessionmaker(bind=engine)
 
 _DDL = """
@@ -139,7 +144,30 @@ CREATE TABLE IF NOT EXISTS discovery_candidates (
 """
 
 
+def _connect_with_retry(retries: int = 5, delay: float = 3.0):
+    """
+    Neon serverless cold-starts sometimes reject the first connection with an
+    SSL reset. Retry with backoff until the server is fully awake.
+    """
+    last_err = None
+    for attempt in range(retries):
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return
+        except Exception as e:
+            last_err = e
+            if attempt < retries - 1:
+                log.info("DB not ready (attempt %d/%d) — retrying in %.0fs...",
+                         attempt + 1, retries, delay)
+                time.sleep(delay)
+                delay = min(delay * 2, 30.0)
+            else:
+                raise RuntimeError(f"Could not connect to DB after {retries} attempts: {last_err}") from e
+
+
 def init_db():
+    _connect_with_retry()
     with engine.connect() as conn:
         conn.execute(text(_DDL))
         conn.commit()
@@ -154,33 +182,32 @@ def load_candidates_from_csv():
     added = 0
     with open(CANDIDATES_CSV, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        db = Session()
-        try:
-            for row in reader:
-                handle = row["handle"].strip()
-                if not handle or handle.startswith("#"):
-                    continue
-                exists = db.execute(
-                    text("SELECT 1 FROM discovery_candidates WHERE handle = :h"),
-                    {"h": handle},
-                ).fetchone()
-                if not exists:
-                    db.execute(
-                        text("""
-                            INSERT INTO discovery_candidates (handle, name, category, notes)
-                            VALUES (:h, :n, :c, :no)
-                        """),
-                        {
-                            "h":  handle,
-                            "n":  row.get("name", ""),
-                            "c":  row.get("category", "default"),
-                            "no": row.get("notes", ""),
-                        },
-                    )
-                    added += 1
-            db.commit()
-        finally:
-            db.close()
+        rows = [r for r in reader
+                if r["handle"].strip() and not r["handle"].strip().startswith("#")]
+
+    # Use engine.connect() directly so pool_pre_ping reconnects after Neon idle-suspend
+    with engine.connect() as conn:
+        for row in rows:
+            handle = row["handle"].strip()
+            exists = conn.execute(
+                text("SELECT 1 FROM discovery_candidates WHERE handle = :h"),
+                {"h": handle},
+            ).fetchone()
+            if not exists:
+                conn.execute(
+                    text("""
+                        INSERT INTO discovery_candidates (handle, name, category, notes)
+                        VALUES (:h, :n, :c, :no)
+                    """),
+                    {
+                        "h":  handle,
+                        "n":  row.get("name", ""),
+                        "c":  row.get("category", "default"),
+                        "no": row.get("notes", ""),
+                    },
+                )
+                added += 1
+        conn.commit()
     return added
 
 
