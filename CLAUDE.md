@@ -51,6 +51,8 @@ PostgreSQL.
 
 **Double-trade guard:** `_execute_signal()` skips a signal if `paper_trades` already has a `placed` row for the same (ceo, ticker, tweet_date) — protects against retries and against the Render worker + GitHub Actions both processing the same tweet.
 
+**Position sizing & risk caps:** trade size is conviction-scaled by `position_notional()` (blends model confidence and tightness onto [`MIN_NOTIONAL`, `MAX_NOTIONAL`]). Before opening a new position, `risk_gate()` enforces `MAX_OPEN_POSITIONS` and a `MAX_DAILY_LOSS` kill switch (via Alpaca equity vs. prior close). All sizing/risk limits are env-overridable.
+
 **Special account types:**
 - congressional-trade aggregators (`unusual_whales`, `capitoltrades`) and policy accounts (`realDonaldTrump`, `POTUS`, `ScottBessent`) are exempt from the sentiment gate in `passes_gates()` — their posts are factual/low-sentiment, so the signal comes from content, not tone.
 - short-seller accounts (`HindenburgRes`, `muddywaters`, etc. — see `_SHORT_SELLER_HANDLES`) get a `short_report` fast-path: a report naming a ticker is a fixed DOWN signal, since these posts move stocks sharply on publication.

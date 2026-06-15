@@ -69,10 +69,22 @@ HIGH_PRIORITY_HANDLES = {
 
 CONFIDENCE_THRESHOLD = 55.0
 TIGHTNESS_THRESHOLD  = 0.20
-TRADE_NOTIONAL       = 1000.0
 TWEET_PAGES          = 2          # pages of tweets to fetch per CEO per cycle (~40 tweets)
 FINBERT_THRESHOLD    = 0.10
 MIN_TEXT_LEN         = 15
+
+# ── Position sizing (conviction-scaled) ────────────────────────────────────
+# Notional scales between MIN and MAX by a conviction score built from the
+# model confidence and the relationship tightness. TRADE_NOTIONAL is the
+# fallback/base used for logging defaults and non-signal paths.
+TRADE_NOTIONAL = float(os.getenv("TRADE_NOTIONAL", "1000"))
+MIN_NOTIONAL   = float(os.getenv("MIN_NOTIONAL",   "500"))
+MAX_NOTIONAL   = float(os.getenv("MAX_NOTIONAL",   "2500"))
+CONF_SIZING_CEILING = 90.0   # confidence at/above which the confidence factor maxes out
+
+# ── Portfolio risk caps ────────────────────────────────────────────────────
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "15"))
+MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS", "1500"))  # halt new entries past this loss
 
 ET = ZoneInfo("America/New_York")
 
@@ -358,7 +370,56 @@ def _trading_client():
     )
 
 
-def place_order(ticker: str, direction: str, dry_run: bool) -> str | None:
+def position_notional(confidence: float, tightness: float | None) -> float:
+    """
+    Conviction-scaled trade size. Blends model confidence and relationship
+    tightness into a 0–1 conviction score, then maps it onto [MIN, MAX] notional.
+
+    Confidence contributes from the gate (55%) up to CONF_SIZING_CEILING (90%);
+    tightness contributes directly (None → 0.5, the neutral mid-point used by
+    fast-path signals that skip the registry).
+    """
+    span = max(CONF_SIZING_CEILING - CONFIDENCE_THRESHOLD, 1.0)
+    conf_frac = max(0.0, min((confidence - CONFIDENCE_THRESHOLD) / span, 1.0))
+    tight = tightness if tightness is not None else 0.5
+    conviction = 0.6 * conf_frac + 0.4 * tight
+    return round(MIN_NOTIONAL + conviction * (MAX_NOTIONAL - MIN_NOTIONAL), 2)
+
+
+def risk_gate(db, ticker: str, dry_run: bool) -> tuple[bool, str]:
+    """
+    Portfolio-level guardrails checked before opening a new position.
+    Returns (allowed, reason). Exits and same-ticker reversals are not gated
+    here — they don't add a new position slot.
+    """
+    already_tracked = db.execute(
+        text("SELECT 1 FROM managed_positions WHERE ticker = :t"), {"t": ticker}
+    ).fetchone()
+
+    if not already_tracked:
+        open_count = db.execute(
+            text("SELECT COUNT(*) FROM managed_positions")
+        ).scalar() or 0
+        if open_count >= MAX_OPEN_POSITIONS:
+            return False, f"max open positions reached ({open_count}/{MAX_OPEN_POSITIONS})"
+
+    if dry_run:
+        return True, ""
+
+    # Daily-loss kill switch — Alpaca tracks equity vs the prior close.
+    try:
+        acct = _trading_client().get_account()
+        daily_pl = float(acct.equity) - float(acct.last_equity)
+        if daily_pl <= -MAX_DAILY_LOSS:
+            return False, f"daily loss limit hit (P&L ${daily_pl:,.0f})"
+    except Exception as e:
+        log.warning("  risk check: could not read account (%s) — allowing trade", e)
+
+    return True, ""
+
+
+def place_order(ticker: str, direction: str, notional: float,
+                dry_run: bool) -> str | None:
     """Place a paper market order. Returns Alpaca order ID or None on dry-run."""
     from alpaca.trading.requests import MarketOrderRequest
     from alpaca.trading.enums import OrderSide, TimeInForce
@@ -382,7 +443,7 @@ def place_order(ticker: str, direction: str, dry_run: bool) -> str | None:
 
     if side == OrderSide.BUY:
         order_req = MarketOrderRequest(
-            symbol=ticker, notional=TRADE_NOTIONAL,
+            symbol=ticker, notional=notional,
             side=side, time_in_force=TimeInForce.DAY,
         )
     else:
@@ -398,7 +459,7 @@ def place_order(ticker: str, direction: str, dry_run: bool) -> str | None:
         except Exception:
             price = 100.0
         order_req = MarketOrderRequest(
-            symbol=ticker, qty=max(1, int(TRADE_NOTIONAL / price)),
+            symbol=ticker, qty=max(1, int(notional / price)),
             side=side, time_in_force=TimeInForce.DAY,
         )
 
@@ -410,7 +471,8 @@ def log_trade(db, ceo: str, tweet_text: str, tweet_date, topic: str,
               ticker: str, direction: str, confidence: float,
               tightness: float | None, sentiment: float,
               order_id: str | None, status: str,
-              side_str: str, skip_reason: str | None = None):
+              side_str: str, skip_reason: str | None = None,
+              notional: float = TRADE_NOTIONAL):
     db.execute(
         text("""
             INSERT INTO paper_trades
@@ -429,7 +491,7 @@ def log_trade(db, ceo: str, tweet_text: str, tweet_date, topic: str,
             "topic":      topic,
             "ticker":     ticker,
             "side":       side_str,
-            "notional":   TRADE_NOTIONAL,
+            "notional":   notional,
             "direction":  direction,
             "conf":       confidence,
             "sent":       sentiment,
@@ -728,8 +790,23 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
                 mark_signal_processed(db, sig["id"], None)
             return
 
+    # Portfolio risk caps — block new entries past position/loss limits.
+    allowed, reason = risk_gate(db, ticker, dry_run)
+    if not allowed:
+        log.warning("  RISK HALT — %s %s/%s skipped: %s", ceo, topic, ticker, reason)
+        log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
+                  direction, confidence, tightness, sentiment,
+                  None, "skipped", side_str, skip_reason=f"risk: {reason}",
+                  notional=0.0)
+        if "id" in sig:
+            mark_signal_processed(db, sig["id"], None)
+        return
+
+    # Conviction-scaled position size
+    notional = position_notional(confidence, tightness)
+
     try:
-        order_id = place_order(ticker, direction, dry_run)
+        order_id = place_order(ticker, direction, notional, dry_run)
 
         if order_id == "DUPLICATE":
             log.info(
@@ -740,18 +817,19 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
             log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
                       direction, confidence, tightness, sentiment,
                       None, "skipped", side_str,
-                      skip_reason="already positioned same side")
+                      skip_reason="already positioned same side", notional=0.0)
         else:
             log.info(
-                "%s%s %s → %s (%s) conf=%.1f%% tight=%s — ORDER %s%s",
+                "%s%s %s → %s (%s) conf=%.1f%% tight=%s size=$%.0f — ORDER %s%s",
                 prefix, ceo, topic, ticker, direction, confidence,
-                f"{tightness:.3f}" if tightness else "n/a",
+                f"{tightness:.3f}" if tightness else "n/a", notional,
                 "PLACED" if not dry_run else "WOULD PLACE",
                 f" id={order_id}" if order_id else "",
             )
             log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
                       direction, confidence, tightness, sentiment,
-                      order_id, "placed" if not dry_run else "dry-run", side_str)
+                      order_id, "placed" if not dry_run else "dry-run", side_str,
+                      notional=notional)
             if not dry_run:
                 increment_trades(db, ceo)
                 # Track the open position so it's closed at the next-day horizon
@@ -770,7 +848,7 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
         log.error("  Order failed for %s/%s: %s", ceo, ticker, e)
         log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
                   direction, confidence, tightness, sentiment,
-                  None, "error", side_str, skip_reason=str(e))
+                  None, "error", side_str, skip_reason=str(e), notional=notional)
         # Always retire the queue entry on failure — don't retry indefinitely
         if "id" in sig:
             mark_signal_processed(db, sig["id"], None)
