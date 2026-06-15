@@ -201,8 +201,50 @@ _NON_TICKERS = {
     "REP", "SEN", "THE", "AND", "FOR", "LLC", "INC", "ETF", "USA",
     "USD", "NYSE", "SEC", "ACT", "NEW", "OLD", "BUY", "SELL", "SOLD",
     "STOCK", "SHARES", "NET", "TAX", "TRADE", "ALERT", "PURCHASED",
-    "BOUGHT", "DIVEST", "WORTH",
+    "BOUGHT", "DIVEST", "WORTH", "CEO", "CFO", "DOJ", "FBI", "SHORT",
 }
+
+# Short-seller research accounts. A report from one of these is a strong DOWN
+# signal on the named ticker regardless of the post's sentiment tone.
+_SHORT_SELLER_HANDLES = {
+    "HindenburgRes", "muddywaters", "CitronResearch", "GothamResearch",
+    "PrestigeEconom1", "FuzzyPandaShort", "ScorpionCap", "WolfpackReports",
+    "BonitasResearch", "ViceroyResearch", "SprucePointCap",
+}
+
+_SHORT_REPORT_MARKERS = [
+    "short", "we are short", "strong sell", "new report", "investigation",
+    "fraud", "accounting", "overvalued", "scheme", "ponzi", "misleading",
+    "scam", "red flag", "downside", "going to zero", "put options",
+]
+
+# "(NASDAQ: XYZ)", "(NYSE: ABC)", "(NYSE:ABC)" etc.
+_EXCHANGE_TICKER_RE = re.compile(
+    r'\((?:NASDAQ|NYSE|NYSEARCA|AMEX|OTC)[:\s]+([A-Za-z]{1,5})\)', re.IGNORECASE
+)
+
+
+def parse_short_seller_report(text: str) -> dict | None:
+    """
+    Parse a short-seller research post (Hindenburg, Muddy Waters, etc.).
+    A report is always a DOWN signal on the named ticker.
+
+    Returns {'ticker': str, 'direction': 'Down'} or None.
+    """
+    if not any(m in text.lower() for m in _SHORT_REPORT_MARKERS):
+        return None
+
+    m = _CASHTAG_RE.search(text)
+    if m and m.group(1) not in _NON_TICKERS:
+        return {"ticker": m.group(1), "direction": "Down"}
+
+    m = _EXCHANGE_TICKER_RE.search(text)
+    if m:
+        ticker = m.group(1).upper()
+        if ticker not in _NON_TICKERS:
+            return {"ticker": ticker, "direction": "Down"}
+
+    return None
 
 
 def parse_congressional_trade(text: str) -> dict | None:
@@ -268,10 +310,11 @@ _COMPETITOR_KEYWORDS = {
 
 def get_tweet_topic(text: str, ceo_handle: str = None) -> str:
     """
-    Classify a tweet into one of eight topic buckets.
+    Classify a tweet into one of nine topic buckets.
 
     Priority order (first match wins):
-        congressional_trade — disclosure post from unusual_whales / quiver_quant
+        congressional_trade — disclosure post from unusual_whales / capitoltrades
+        short_report        — short-seller research post (DOWN signal)
         company_ops         — about the CEO's own company / products
         crypto              — cryptocurrency content
         ai_tech             — AI / ML / compute content
@@ -280,8 +323,9 @@ def get_tweet_topic(text: str, ceo_handle: str = None) -> str:
         macro_market        — macroeconomic / regulatory content
         personal            — everything else (no expected market signal)
 
-    Returns one of: 'congressional_trade', 'company_ops', 'crypto', 'ai_tech',
-                    'competitor', 'policy', 'macro_market', 'personal'
+    Returns one of: 'congressional_trade', 'short_report', 'company_ops',
+                    'crypto', 'ai_tech', 'competitor', 'policy',
+                    'macro_market', 'personal'
     """
     if not text or len(text.strip()) < 15:
         return "personal"
@@ -301,30 +345,38 @@ def get_tweet_topic(text: str, ceo_handle: str = None) -> str:
         if is_trade:
             return "congressional_trade"
 
-    # 2 — Company-specific
+    # 2 — Short-seller report (DOWN signal, bypasses ML). Only fires for known
+    # short-seller accounts that name a ticker in a report-like post.
+    if ceo_handle in _SHORT_SELLER_HANDLES:
+        if any(m in t for m in _SHORT_REPORT_MARKERS) and (
+            _CASHTAG_RE.search(text) or _EXCHANGE_TICKER_RE.search(text)
+        ):
+            return "short_report"
+
+    # 3 — Company-specific
     if ceo_handle and ceo_handle in _CEO_COMPANY_KEYWORDS:
         if any(kw in t for kw in _CEO_COMPANY_KEYWORDS[ceo_handle]):
             return "company_ops"
 
-    # 3 — Crypto (before AI so "bitcoin mining" → crypto not ai_tech)
+    # 4 — Crypto (before AI so "bitcoin mining" → crypto not ai_tech)
     if any(kw in t for kw in _CRYPTO_KEYWORDS):
         return "crypto"
 
-    # 4 — AI/tech
+    # 5 — AI/tech
     if any(kw in t for kw in _AI_KEYWORDS):
         return "ai_tech"
 
-    # 5 — Named competitor
+    # 6 — Named competitor
     if ceo_handle and ceo_handle in _COMPETITOR_KEYWORDS:
         if any(kw in t for kw in _COMPETITOR_KEYWORDS[ceo_handle]):
             return "competitor"
 
-    # 6 — Policy (tariffs, sanctions, executive orders) — for presidential/treasury accounts
+    # 7 — Policy (tariffs, sanctions, executive orders) — for presidential/treasury accounts
     if ceo_handle and ceo_handle in _POLICY_ACCOUNT_HANDLES:
         if any(kw in t for kw in _POLICY_KEYWORDS):
             return "policy"
 
-    # 7 — Macro/market
+    # 8 — Macro/market
     if any(kw in t for kw in _MACRO_KEYWORDS):
         return "macro_market"
 

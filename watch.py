@@ -127,10 +127,24 @@ CREATE TABLE IF NOT EXISTS signal_queue (
 """
 
 
+_MANAGED_POSITIONS_DDL = """
+CREATE TABLE IF NOT EXISTS managed_positions (
+    ticker            TEXT PRIMARY KEY,
+    side              TEXT,            -- 'long' or 'short'
+    ceo               TEXT,
+    topic             TEXT,
+    opened_at         TIMESTAMPTZ DEFAULT NOW(),
+    exit_after        TIMESTAMPTZ,    -- close at/after this time (next-day horizon)
+    entry_confidence  FLOAT
+);
+"""
+
+
 def init_db():
     with engine.connect() as conn:
         conn.execute(text(_WATCHER_STATE_DDL))
         conn.execute(text(_SIGNAL_QUEUE_DDL))
+        conn.execute(text(_MANAGED_POSITIONS_DDL))
         conn.commit()
 
 
@@ -276,6 +290,20 @@ def next_market_open(now_et: datetime) -> datetime:
     return candidate
 
 
+def next_day_exit_time(entry_et: datetime) -> datetime:
+    """
+    Exit horizon for a trade: the next trading day after entry, at 15:30 ET.
+
+    The model predicts next-day direction, so positions are held until the close
+    of the following session. 15:30 (not 16:00) ensures the last pre-close poll
+    cycle catches the exit while the market is still open.
+    """
+    d = entry_et + timedelta(days=1)
+    while d.weekday() >= 5 or d.strftime("%Y-%m-%d") in _NYSE_HOLIDAYS:
+        d += timedelta(days=1)
+    return d.replace(hour=15, minute=30, second=0, microsecond=0)
+
+
 # ---------------------------------------------------------------------------
 # Signal gates
 # ---------------------------------------------------------------------------
@@ -301,7 +329,7 @@ def passes_gates(row: pd.Series, eng_threshold: float, ceo: str | None = None) -
     # was tuned for opinionated CEO tweets and would wrongly discard them, so exempt
     # those topics — the ticker/direction comes from the post itself, not sentiment.
     topic = get_tweet_topic(text, ceo) if ceo else None
-    if topic not in ("congressional_trade", "policy"):
+    if topic not in ("congressional_trade", "policy", "short_report"):
         finbert = row.get("finbert_score")
         if finbert is not None:
             if abs(float(finbert)) < FINBERT_THRESHOLD:
@@ -320,22 +348,25 @@ def passes_gates(row: pd.Series, eng_threshold: float, ceo: str | None = None) -
 # Trade placement (shared by immediate + queued paths)
 # ---------------------------------------------------------------------------
 
-def place_order(ticker: str, direction: str, dry_run: bool) -> str | None:
-    """Place a paper market order. Returns Alpaca order ID or None on dry-run."""
+def _trading_client():
+    """Construct an Alpaca paper TradingClient from env credentials."""
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.requests import MarketOrderRequest
-    from alpaca.trading.enums import OrderSide, TimeInForce
-    from pipeline_utils import compute_technicals
-    from processor import DataProcessor
-
-    if dry_run:
-        return None
-
-    tc   = TradingClient(
+    return TradingClient(
         os.getenv("ALPACA_PAPER_API_KEY"),
         os.getenv("ALPACA_PAPER_SECRET_KEY"),
         paper=True,
     )
+
+
+def place_order(ticker: str, direction: str, dry_run: bool) -> str | None:
+    """Place a paper market order. Returns Alpaca order ID or None on dry-run."""
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce
+
+    if dry_run:
+        return None
+
+    tc   = _trading_client()
     side = OrderSide.BUY if direction == "Up" else OrderSide.SELL
 
     # Position management
@@ -411,6 +442,83 @@ def log_trade(db, ceo: str, tweet_text: str, tweet_date, topic: str,
 
 
 # ---------------------------------------------------------------------------
+# Position lifecycle — scheduled exit at the next-day prediction horizon
+# ---------------------------------------------------------------------------
+
+def register_position(db, ticker: str, side: str, ceo: str, topic: str,
+                      confidence: float, exit_after: datetime):
+    """Record (or refresh) an open position so it can be closed at its horizon."""
+    db.execute(
+        text("""
+            INSERT INTO managed_positions
+                (ticker, side, ceo, topic, opened_at, exit_after, entry_confidence)
+            VALUES (:ticker, :side, :ceo, :topic, NOW(), :exit_after, :conf)
+            ON CONFLICT (ticker) DO UPDATE SET
+                side             = EXCLUDED.side,
+                ceo              = EXCLUDED.ceo,
+                topic            = EXCLUDED.topic,
+                opened_at        = NOW(),
+                exit_after       = EXCLUDED.exit_after,
+                entry_confidence = EXCLUDED.entry_confidence
+        """),
+        {"ticker": ticker, "side": side, "ceo": ceo, "topic": topic,
+         "exit_after": exit_after, "conf": confidence},
+    )
+
+
+def close_due_positions(dry_run: bool):
+    """
+    Close any tracked position whose next-day exit horizon has passed.
+    Runs only during market hours (a market order needs an open market).
+    """
+    now_et = datetime.now(ET)
+    if market_status(now_et) != "open":
+        return
+
+    db = Session()
+    try:
+        rows = db.execute(
+            text("""
+                SELECT ticker, side, ceo, topic FROM managed_positions
+                WHERE exit_after <= NOW()
+            """)
+        ).fetchall()
+        if not rows:
+            return
+
+        tc = None if dry_run else _trading_client()
+        for r in rows:
+            ticker = r.ticker
+            exit_side = "sell" if r.side == "long" else "buy_to_cover"
+            try:
+                if not dry_run:
+                    tc.close_position(ticker)
+                log.info(
+                    "%sEXIT %s (%s/%s) — closed at next-day horizon",
+                    "[DRY-RUN] " if dry_run else "", ticker, r.ceo, r.topic,
+                )
+                log_trade(db, r.ceo, "", None, r.topic, ticker,
+                          "exit", 0.0, None, 0.0, None,
+                          "exit" if not dry_run else "dry-run-exit", exit_side,
+                          skip_reason="scheduled next-day horizon exit")
+                db.execute(text("DELETE FROM managed_positions WHERE ticker = :t"),
+                           {"t": ticker})
+            except Exception as e:
+                msg = str(e).lower()
+                log.error("  Exit failed for %s: %s", ticker, e)
+                # Position already gone at the broker — stop tracking it.
+                if "position does not exist" in msg or "not found" in msg or "404" in msg:
+                    db.execute(text("DELETE FROM managed_positions WHERE ticker = :t"),
+                               {"t": ticker})
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.error("Exit sweep error: %s", e)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Signal evaluation pipeline for a single tweet row
 # ---------------------------------------------------------------------------
 
@@ -459,6 +567,27 @@ def evaluate_tweet(row: pd.Series, ceo: str, db,
             "tightness":  1.0,
             "direction":  trade["direction"],
             "confidence": 80.0,
+            "sentiment":  sentiment,
+            "finbert":    float(finbert) if finbert is not None else None,
+        }
+
+    # Fast path — short-seller report: a published report is a strong DOWN signal
+    # on the named ticker. Skip registry and ML; the ticker comes from the post.
+    if topic == "short_report":
+        from classifier import parse_short_seller_report
+        rep = parse_short_seller_report(tweet_text)
+        if rep is None:
+            return None
+        log.info("  SHORT REPORT: %s → %s (Down)", ceo, rep["ticker"])
+        return {
+            "ceo":        ceo,
+            "tweet_text": tweet_text,
+            "tweet_date": tweet_date,
+            "topic":      topic,
+            "ticker":     rep["ticker"],
+            "tightness":  1.0,
+            "direction":  "Down",
+            "confidence": 75.0,
             "sentiment":  sentiment,
             "finbert":    float(finbert) if finbert is not None else None,
         }
@@ -578,6 +707,27 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
     side_str   = "buy" if direction == "Up" else "sell_short"
     prefix     = "[DRY-RUN] " if dry_run else ""
 
+    # Idempotency — never trade the same tweet twice. Guards against retries and
+    # against two watcher deployments (the Render worker and the GitHub Actions
+    # db-only run) both processing the same signal.
+    if not dry_run and tweet_date is not None:
+        td_str = str(tweet_date)[:19]
+        dup = db.execute(
+            text("""
+                SELECT 1 FROM paper_trades
+                WHERE ceo = :ceo AND ticker = :ticker AND tweet_date = :td
+                  AND status = 'placed'
+                LIMIT 1
+            """),
+            {"ceo": ceo, "ticker": ticker, "td": td_str},
+        ).fetchone()
+        if dup:
+            log.info("  %s %s/%s already traded for this tweet — skipping duplicate",
+                     ceo, topic, ticker)
+            if "id" in sig:
+                mark_signal_processed(db, sig["id"], None)
+            return
+
     try:
         order_id = place_order(ticker, direction, dry_run)
 
@@ -604,6 +754,13 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
                       order_id, "placed" if not dry_run else "dry-run", side_str)
             if not dry_run:
                 increment_trades(db, ceo)
+                # Track the open position so it's closed at the next-day horizon
+                register_position(
+                    db, ticker,
+                    "long" if direction == "Up" else "short",
+                    ceo, topic, confidence,
+                    next_day_exit_time(datetime.now(ET)),
+                )
 
         # Mark queue entry processed if it came from the queue
         if "id" in sig:
@@ -936,6 +1093,9 @@ async def run(ceo_list: list[str], dry_run: bool, interval_override: int | None,
                 poll_from_db(poll_list, dry_run)
             else:
                 await poll_once(poll_list, dry_run)
+
+        # Close any positions that have reached their next-day exit horizon
+        close_due_positions(dry_run)
 
         if once:
             break

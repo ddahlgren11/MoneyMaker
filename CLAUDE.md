@@ -45,9 +45,15 @@ PostgreSQL.
 - `relationship_analysis.py` — builds the `ceo_ticker_relationships` registry (per-CEO, per-topic best ticker + tightness score)
 - `app.py` — Streamlit dashboard
 
-**Signal flow (watch.py):** new tweet → `get_tweet_topic()` → if `congressional_trade`, parse ticker/direction directly (fast path, bypasses ML); else registry lookup for best ticker → ML prediction → confidence gate (≥55%) → trade if market open, else queue for next open.
+**Signal flow (watch.py):** new tweet → `get_tweet_topic()` → if `congressional_trade` or `short_report`, parse ticker/direction directly (fast path, bypasses ML); else registry lookup for best ticker → ML prediction → confidence gate (≥55%) → trade if market open, else queue for next open.
 
-**Special account types:** congressional-trade aggregators (`unusual_whales`, `capitoltrades`) and policy accounts (`realDonaldTrump`, `POTUS`, `ScottBessent`) are exempt from the sentiment gate in `passes_gates()` — their posts are factual/low-sentiment, so the signal comes from content, not tone.
+**Exit horizon:** the model predicts *next-day* direction, so every entry is registered in `managed_positions` with an `exit_after` time (next trading day, 15:30 ET) and closed by `close_due_positions()` on the first poll cycle past that time. Without this, positions would otherwise only close on a reversing signal.
+
+**Double-trade guard:** `_execute_signal()` skips a signal if `paper_trades` already has a `placed` row for the same (ceo, ticker, tweet_date) — protects against retries and against the Render worker + GitHub Actions both processing the same tweet.
+
+**Special account types:**
+- congressional-trade aggregators (`unusual_whales`, `capitoltrades`) and policy accounts (`realDonaldTrump`, `POTUS`, `ScottBessent`) are exempt from the sentiment gate in `passes_gates()` — their posts are factual/low-sentiment, so the signal comes from content, not tone.
+- short-seller accounts (`HindenburgRes`, `muddywaters`, etc. — see `_SHORT_SELLER_HANDLES`) get a `short_report` fast-path: a report naming a ticker is a fixed DOWN signal, since these posts move stocks sharply on publication.
 
 **Weekend handling:** tweet dates on weekends shift to the following Monday for stock correlation.
 
@@ -58,6 +64,7 @@ Neon PostgreSQL (SQLAlchemy). Key tables:
 - `news_sentiment_cache` — cached Finnhub news sentiment per (ticker, date)
 - `ceo_ticker_relationships` — registry of best (ceo, topic) → ticker with `tightness_score` (built by `relationship_analysis.py`)
 - `signal_queue` — signals found outside market hours, executed at next open (`watch.py`)
-- `paper_trades` — log of every placed/skipped/errored trade
+- `managed_positions` — open positions with their scheduled next-day exit time (`watch.py`)
+- `paper_trades` — log of every placed/skipped/errored/exit trade
 - `watcher_state` — per-CEO last-seen tweet watermark and counters
 - `tweets` / `stocks` — legacy tables used by the original FastAPI/Streamlit flow
