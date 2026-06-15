@@ -1,3 +1,4 @@
+import re
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
 _analyzer = SentimentIntensityAnalyzer()
@@ -166,6 +167,135 @@ _MACRO_KEYWORDS = [
     "bear market", "bull market", "market crash",
 ]
 
+_POLICY_KEYWORDS = [
+    "tariff", "tariffs", "sanction", "sanctions", "executive order",
+    "trade deal", "trade war", "trade agreement", "import duty", "export ban",
+    "chip ban", "semiconductor restriction", "china ban", "decoupling",
+    "defense budget", "defense spending", "military spending", "pentagon budget",
+    "nato spending", "interest rate", "federal reserve", "rate hike", "rate cut",
+    "debt ceiling", "government shutdown", "infrastructure bill", "stimulus",
+    "tax cut", "tax hike", "capital gains", "corporate tax",
+]
+
+# Accounts whose macro content should be classified as policy rather than macro_market
+# so the relationship registry tests sector ETFs instead of SPY/QQQ alone
+_POLICY_ACCOUNT_HANDLES = {
+    "realDonaldTrump", "POTUS", "ScottBessent", "stevenmnuchin1",
+}
+
+_CONGRESSIONAL_MARKERS = [
+    "rep.", "sen.", "senator", "representative", "congress",
+    "disclosure", "stock act", "trade alert", "purchased shares",
+    # Known names that appear in disclosure aggregator posts
+    "pelosi", "tuberville", "crenshaw", "greene", "ocasio-cortez",
+]
+
+# Matches "$50K - $100K", "$1M-$5M", "$1,001 - $15,000" etc.
+_AMOUNT_RE  = re.compile(r'\$[\d,]+[KMB]?\s*[-–to]+\s*\$[\d,]+[KMB]?', re.IGNORECASE)
+# Matches cashtag like $TSLA, $NVDA (1-5 uppercase letters)
+_CASHTAG_RE = re.compile(r'\$([A-Z]{1,5})\b')
+# Matches "of TSLA" or "of $TSLA"
+_OF_TICKER_RE = re.compile(r'\bof\s+\$?([A-Z]{1,5})\b')
+# Non-ticker uppercase words to filter out
+_NON_TICKERS = {
+    "REP", "SEN", "THE", "AND", "FOR", "LLC", "INC", "ETF", "USA",
+    "USD", "NYSE", "SEC", "ACT", "NEW", "OLD", "BUY", "SELL", "SOLD",
+    "STOCK", "SHARES", "NET", "TAX", "TRADE", "ALERT", "PURCHASED",
+    "BOUGHT", "DIVEST", "WORTH", "CEO", "CFO", "DOJ", "FBI", "SHORT",
+}
+
+# Short-seller research accounts. A report from one of these is a strong DOWN
+# signal on the named ticker regardless of the post's sentiment tone.
+_SHORT_SELLER_HANDLES = {
+    "HindenburgRes", "muddywaters", "CitronResearch", "GothamResearch",
+    "PrestigeEconom1", "FuzzyPandaShort", "ScorpionCap", "WolfpackReports",
+    "BonitasResearch", "ViceroyResearch", "SprucePointCap",
+}
+
+_SHORT_REPORT_MARKERS = [
+    "short", "we are short", "strong sell", "new report", "investigation",
+    "fraud", "accounting", "overvalued", "scheme", "ponzi", "misleading",
+    "scam", "red flag", "downside", "going to zero", "put options",
+]
+
+# "(NASDAQ: XYZ)", "(NYSE: ABC)", "(NYSE:ABC)" etc.
+_EXCHANGE_TICKER_RE = re.compile(
+    r'\((?:NASDAQ|NYSE|NYSEARCA|AMEX|OTC)[:\s]+([A-Za-z]{1,5})\)', re.IGNORECASE
+)
+
+
+def parse_short_seller_report(text: str) -> dict | None:
+    """
+    Parse a short-seller research post (Hindenburg, Muddy Waters, etc.).
+    A report is always a DOWN signal on the named ticker.
+
+    Returns {'ticker': str, 'direction': 'Down'} or None.
+    """
+    if not any(m in text.lower() for m in _SHORT_REPORT_MARKERS):
+        return None
+
+    m = _CASHTAG_RE.search(text)
+    if m and m.group(1) not in _NON_TICKERS:
+        return {"ticker": m.group(1), "direction": "Down"}
+
+    m = _EXCHANGE_TICKER_RE.search(text)
+    if m:
+        ticker = m.group(1).upper()
+        if ticker not in _NON_TICKERS:
+            return {"ticker": ticker, "direction": "Down"}
+
+    return None
+
+
+def parse_congressional_trade(text: str) -> dict | None:
+    """
+    Parse a congressional trade disclosure post from unusual_whales
+    or capitoltrades.
+
+    Returns {'ticker': str, 'direction': 'Up'|'Down'} or None.
+    """
+    t = text.lower()
+
+    # Must look like a congressional disclosure
+    has_marker = any(m in t for m in _CONGRESSIONAL_MARKERS)
+    has_amount  = bool(_AMOUNT_RE.search(text))
+    if not has_marker and not has_amount:
+        return None
+
+    # Direction
+    is_buy  = any(w in t for w in ["bought", "purchased", "acquired", "purchase"])
+    is_sell = any(w in t for w in ["sold", "sale", "divested", "divest", "sell"])
+    if not (is_buy or is_sell):
+        return None
+    direction = "Up" if is_buy else "Down"
+
+    # Ticker — prefer cashtag ($TSLA), then "of TICKER", then nearest caps word
+    m = _CASHTAG_RE.search(text)
+    if m:
+        ticker = m.group(1)
+        if ticker not in _NON_TICKERS:
+            return {"ticker": ticker, "direction": direction}
+
+    m = _OF_TICKER_RE.search(text)
+    if m:
+        ticker = m.group(1)
+        if ticker not in _NON_TICKERS:
+            return {"ticker": ticker, "direction": direction}
+
+    # Last resort: caps word within 60 chars of dollar amount
+    amount_m = _AMOUNT_RE.search(text)
+    if amount_m:
+        start   = max(0, amount_m.start() - 60)
+        end     = min(len(text), amount_m.end() + 60)
+        context = text[start:end]
+        candidates = [c for c in re.findall(r'\b([A-Z]{2,5})\b', context)
+                      if c not in _NON_TICKERS]
+        if candidates:
+            return {"ticker": candidates[-1], "direction": direction}
+
+    return None
+
+
 _COMPETITOR_KEYWORDS = {
     # Maps CEO handle → list of competitor names/tickers that signal competitor topic
     "elonmusk":     ["rivian", "rivn", "lucid", "lcid", "nio", "byd", "waymo"],
@@ -180,18 +310,22 @@ _COMPETITOR_KEYWORDS = {
 
 def get_tweet_topic(text: str, ceo_handle: str = None) -> str:
     """
-    Classify a tweet into one of six topic buckets.
+    Classify a tweet into one of nine topic buckets.
 
     Priority order (first match wins):
-        company_ops  — about the CEO's own company / products
-        crypto       — cryptocurrency content
-        ai_tech      — AI / ML / compute content
-        competitor   — mentions a named competitor
-        macro_market — macroeconomic / regulatory content
-        personal     — everything else (no expected market signal)
+        congressional_trade — disclosure post from unusual_whales / capitoltrades
+        short_report        — short-seller research post (DOWN signal)
+        company_ops         — about the CEO's own company / products
+        crypto              — cryptocurrency content
+        ai_tech             — AI / ML / compute content
+        competitor          — mentions a named competitor
+        policy              — tariffs, sanctions, executive orders (policy accounts)
+        macro_market        — macroeconomic / regulatory content
+        personal            — everything else (no expected market signal)
 
-    Returns one of: 'company_ops', 'crypto', 'ai_tech',
-                    'competitor', 'macro_market', 'personal'
+    Returns one of: 'congressional_trade', 'short_report', 'company_ops',
+                    'crypto', 'ai_tech', 'competitor', 'policy',
+                    'macro_market', 'personal'
     """
     if not text or len(text.strip()) < 15:
         return "personal"
@@ -203,25 +337,46 @@ def get_tweet_topic(text: str, ceo_handle: str = None) -> str:
     if len(stripped) < 10:
         return "personal"
 
-    # 1 — Company-specific (highest priority)
+    # 1 — Congressional trade disclosure (highest priority — bypasses ML)
+    has_marker = any(m in t for m in _CONGRESSIONAL_MARKERS)
+    has_amount  = bool(_AMOUNT_RE.search(text))
+    if has_marker and has_amount:
+        is_trade = any(w in t for w in ["bought", "purchased", "acquired", "sold", "divest"])
+        if is_trade:
+            return "congressional_trade"
+
+    # 2 — Short-seller report (DOWN signal, bypasses ML). Only fires for known
+    # short-seller accounts that name a ticker in a report-like post.
+    if ceo_handle in _SHORT_SELLER_HANDLES:
+        if any(m in t for m in _SHORT_REPORT_MARKERS) and (
+            _CASHTAG_RE.search(text) or _EXCHANGE_TICKER_RE.search(text)
+        ):
+            return "short_report"
+
+    # 3 — Company-specific
     if ceo_handle and ceo_handle in _CEO_COMPANY_KEYWORDS:
         if any(kw in t for kw in _CEO_COMPANY_KEYWORDS[ceo_handle]):
             return "company_ops"
 
-    # 2 — Crypto (before AI so "bitcoin mining" → crypto not ai_tech)
+    # 4 — Crypto (before AI so "bitcoin mining" → crypto not ai_tech)
     if any(kw in t for kw in _CRYPTO_KEYWORDS):
         return "crypto"
 
-    # 3 — AI/tech
+    # 5 — AI/tech
     if any(kw in t for kw in _AI_KEYWORDS):
         return "ai_tech"
 
-    # 4 — Named competitor
+    # 6 — Named competitor
     if ceo_handle and ceo_handle in _COMPETITOR_KEYWORDS:
         if any(kw in t for kw in _COMPETITOR_KEYWORDS[ceo_handle]):
             return "competitor"
 
-    # 5 — Macro/market
+    # 7 — Policy (tariffs, sanctions, executive orders) — for presidential/treasury accounts
+    if ceo_handle and ceo_handle in _POLICY_ACCOUNT_HANDLES:
+        if any(kw in t for kw in _POLICY_KEYWORDS):
+            return "policy"
+
+    # 8 — Macro/market
     if any(kw in t for kw in _MACRO_KEYWORDS):
         return "macro_market"
 
@@ -351,5 +506,27 @@ CEO_TOPIC_UNIVERSE = {
         "company_ops":  ["NVDA", "AMD", "INTC", "QCOM", "SMCI", "ARM"],
         "ai_tech":      ["NVDA", "SMCI", "AMD"],
         "macro_market": ["SPY", "SOXX"],
+    },
+    # Congressional trade aggregators — broad ETF universe; ticker parsed directly from post
+    "unusual_whales": {
+        "congressional_trade": ["SPY", "QQQ", "XLF", "XLE", "XLK", "XLI", "ITA", "SOXX", "TLT", "GLD"],
+        "macro_market":        ["SPY", "QQQ", "TLT", "GLD", "XLF"],
+    },
+    "capitoltrades": {
+        "congressional_trade": ["SPY", "QQQ", "XLF", "XLE", "XLK", "XLI", "ITA", "SOXX", "TLT", "GLD"],
+    },
+    # Presidential / Treasury — policy tweets map to sector ETFs by theme
+    "realDonaldTrump": {
+        "policy":       ["XLI", "SOXX", "XLB", "SLX", "XLE", "ITA", "TLT", "GLD", "SPY", "EEM"],
+        "crypto":       ["COIN", "MSTR", "MARA", "RIOT"],
+        "macro_market": ["SPY", "TLT", "GLD", "XLF", "DXY"],
+    },
+    "POTUS": {
+        "policy":       ["XLI", "SOXX", "XLB", "SLX", "XLE", "ITA", "TLT", "GLD", "SPY", "EEM"],
+        "macro_market": ["SPY", "TLT", "GLD", "XLF"],
+    },
+    "ScottBessent": {
+        "policy":       ["TLT", "XLF", "GLD", "DXY", "SPY", "XLI"],
+        "macro_market": ["TLT", "XLF", "GLD", "SPY"],
     },
 }

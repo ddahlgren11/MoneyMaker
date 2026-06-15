@@ -8,7 +8,7 @@ immediately when a valid signal is detected.
 
 Flow (runs every POLL_INTERVAL seconds):
   For each CEO in the registry:
-    1. Fetch recent tweets via tweety-ns
+    1. Fetch recent tweets via twikit
     2. Identify tweets newer than last processed (dedup by date)
     3. Apply signal gates: engagement · FinBERT content · text length
     4. Classify tweet topic
@@ -48,16 +48,49 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-POLL_MARKET_HOURS_S  = 20 * 60   # 20 min during market hours
+POLL_MARKET_HOURS_S  = 20 * 60   # 20 min — full sweep of all accounts
+POLL_HIGH_PRIORITY_S =  3 * 60   # 3 min — fast lane for time-sensitive accounts
 POLL_EXTENDED_S      = 60 * 60   # 60 min pre/post market
 POLL_OVERNIGHT_S     = 4  * 60 * 60  # 4 hours overnight
 
+# Accounts polled every 3 min during market hours.
+# Short sellers publish rarely but move stocks 20-50% within minutes of posting.
+# Congressional aggregators and presidential accounts also move fast.
+HIGH_PRIORITY_HANDLES = {
+    # Short sellers — reports cause immediate, large moves
+    "HindenburgRes", "muddywaters", "CitronResearch", "GothamResearch", "PrestigeEconom1",
+    # Congressional trade aggregators — disclosures post continuously during market hours
+    "unusual_whales", "capitoltrades",
+    # Presidential / treasury — tariff tweets move sectors within minutes
+    "realDonaldTrump", "POTUS", "ScottBessent",
+    # Highest-signal CEO (tightness 0.57, 4.8% avg move)
+    "george_kurtz",
+}
+
 CONFIDENCE_THRESHOLD = 55.0
 TIGHTNESS_THRESHOLD  = 0.20
-TRADE_NOTIONAL       = 1000.0
 TWEET_PAGES          = 2          # pages of tweets to fetch per CEO per cycle (~40 tweets)
 FINBERT_THRESHOLD    = 0.10
 MIN_TEXT_LEN         = 15
+
+# ── Position sizing (conviction-scaled) ────────────────────────────────────
+# Notional scales between MIN and MAX by a conviction score built from the
+# model confidence and the relationship tightness. TRADE_NOTIONAL is the
+# fallback/base used for logging defaults and non-signal paths.
+TRADE_NOTIONAL = float(os.getenv("TRADE_NOTIONAL", "1000"))
+MIN_NOTIONAL   = float(os.getenv("MIN_NOTIONAL",   "500"))
+MAX_NOTIONAL   = float(os.getenv("MAX_NOTIONAL",   "2500"))
+CONF_SIZING_CEILING = 90.0   # confidence at/above which the confidence factor maxes out
+
+# ── Portfolio risk caps ────────────────────────────────────────────────────
+MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "15"))
+MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS", "1500"))  # halt new entries past this loss
+
+# ── Congressional trades (ingested by congress_ingest.py into congress_trades) ──
+# Only act on disclosures filed within this many days, so the first poll doesn't
+# trade the entire recent backlog. The signal is the disclosure becoming public.
+CONGRESS_RECENCY_DAYS = int(os.getenv("CONGRESS_RECENCY_DAYS", "4"))
+CONGRESS_CONFIDENCE   = 80.0
 
 ET = ZoneInfo("America/New_York")
 
@@ -112,10 +145,45 @@ CREATE TABLE IF NOT EXISTS signal_queue (
 """
 
 
+_MANAGED_POSITIONS_DDL = """
+CREATE TABLE IF NOT EXISTS managed_positions (
+    ticker            TEXT PRIMARY KEY,
+    side              TEXT,            -- 'long' or 'short'
+    ceo               TEXT,
+    topic             TEXT,
+    opened_at         TIMESTAMPTZ DEFAULT NOW(),
+    exit_after        TIMESTAMPTZ,    -- close at/after this time (next-day horizon)
+    entry_confidence  FLOAT
+);
+"""
+
+
+_CONGRESS_TRADES_DDL = """
+CREATE TABLE IF NOT EXISTS congress_trades (
+    id              SERIAL PRIMARY KEY,
+    dedup_key       TEXT UNIQUE,
+    chamber         TEXT,
+    member          TEXT,
+    ticker          TEXT,
+    asset_type      TEXT,
+    txn_type        TEXT,
+    direction       TEXT,
+    txn_date        TEXT,
+    disclosure_date TEXT,
+    amount          TEXT,
+    owner           TEXT,
+    ingested_at     TIMESTAMPTZ DEFAULT NOW(),
+    processed       BOOLEAN DEFAULT FALSE
+);
+"""
+
+
 def init_db():
     with engine.connect() as conn:
         conn.execute(text(_WATCHER_STATE_DDL))
         conn.execute(text(_SIGNAL_QUEUE_DDL))
+        conn.execute(text(_MANAGED_POSITIONS_DDL))
+        conn.execute(text(_CONGRESS_TRADES_DDL))
         conn.commit()
 
 
@@ -167,6 +235,17 @@ def increment_trades(db, ceo: str):
 
 
 def enqueue_signal(db, signal: dict):
+    existing = db.execute(
+        text("""
+            SELECT id FROM signal_queue
+            WHERE ceo = :ceo AND tweet_date = :tweet_date AND ticker = :ticker
+              AND processed = FALSE
+        """),
+        {"ceo": signal["ceo"], "tweet_date": signal["tweet_date"], "ticker": signal["ticker"]},
+    ).fetchone()
+    if existing:
+        log.debug("  signal already queued for %s/%s — skipping duplicate enqueue", signal["ceo"], signal["ticker"])
+        return
     db.execute(
         text("""
             INSERT INTO signal_queue
@@ -250,6 +329,20 @@ def next_market_open(now_et: datetime) -> datetime:
     return candidate
 
 
+def next_day_exit_time(entry_et: datetime) -> datetime:
+    """
+    Exit horizon for a trade: the next trading day after entry, at 15:30 ET.
+
+    The model predicts next-day direction, so positions are held until the close
+    of the following session. 15:30 (not 16:00) ensures the last pre-close poll
+    cycle catches the exit while the market is still open.
+    """
+    d = entry_et + timedelta(days=1)
+    while d.weekday() >= 5 or d.strftime("%Y-%m-%d") in _NYSE_HOLIDAYS:
+        d += timedelta(days=1)
+    return d.replace(hour=15, minute=30, second=0, microsecond=0)
+
+
 # ---------------------------------------------------------------------------
 # Signal gates
 # ---------------------------------------------------------------------------
@@ -262,19 +355,29 @@ def _engagement_score(row: pd.Series) -> float:
     return likes + 2 * retweets + replies + 0.05 * views
 
 
-def passes_gates(row: pd.Series, eng_threshold: float) -> bool:
+def passes_gates(row: pd.Series, eng_threshold: float, ceo: str | None = None) -> bool:
+    from classifier import get_tweet_topic
+
     text = str(row.get("text") or row.get("tweet_text") or "")
     stripped = text.lower().replace("https://", "").replace("http://", "").strip()
     if len(stripped) < MIN_TEXT_LEN:
         return False
-    finbert = row.get("finbert_score")
-    if finbert is not None:
-        if abs(float(finbert)) < FINBERT_THRESHOLD:
-            return False
-    else:
-        # No FinBERT score available — fall back to VADER magnitude
-        if abs(float(row.get("sentiment") or row.get("sentiment_score") or 0)) < 0.15:
-            return False
+
+    # Congressional disclosures and policy statements are factual and low-sentiment
+    # by nature (e.g. "Rep. Pelosi purchased $1M-$5M of $NVDA"). The sentiment gate
+    # was tuned for opinionated CEO tweets and would wrongly discard them, so exempt
+    # those topics — the ticker/direction comes from the post itself, not sentiment.
+    topic = get_tweet_topic(text, ceo) if ceo else None
+    if topic not in ("congressional_trade", "policy", "short_report"):
+        finbert = row.get("finbert_score")
+        if finbert is not None:
+            if abs(float(finbert)) < FINBERT_THRESHOLD:
+                return False
+        else:
+            # No FinBERT score available — fall back to VADER magnitude
+            if abs(float(row.get("sentiment") or row.get("sentiment_score") or 0)) < 0.15:
+                return False
+
     if _engagement_score(row) < eng_threshold:
         return False
     return True
@@ -284,22 +387,74 @@ def passes_gates(row: pd.Series, eng_threshold: float) -> bool:
 # Trade placement (shared by immediate + queued paths)
 # ---------------------------------------------------------------------------
 
-def place_order(ticker: str, direction: str, dry_run: bool) -> str | None:
-    """Place a paper market order. Returns Alpaca order ID or None on dry-run."""
+def _trading_client():
+    """Construct an Alpaca paper TradingClient from env credentials."""
     from alpaca.trading.client import TradingClient
-    from alpaca.trading.requests import MarketOrderRequest
-    from alpaca.trading.enums import OrderSide, TimeInForce
-    from pipeline_utils import compute_technicals
-    from processor import DataProcessor
-
-    if dry_run:
-        return None
-
-    tc   = TradingClient(
+    return TradingClient(
         os.getenv("ALPACA_PAPER_API_KEY"),
         os.getenv("ALPACA_PAPER_SECRET_KEY"),
         paper=True,
     )
+
+
+def position_notional(confidence: float, tightness: float | None) -> float:
+    """
+    Conviction-scaled trade size. Blends model confidence and relationship
+    tightness into a 0–1 conviction score, then maps it onto [MIN, MAX] notional.
+
+    Confidence contributes from the gate (55%) up to CONF_SIZING_CEILING (90%);
+    tightness contributes directly (None → 0.5, the neutral mid-point used by
+    fast-path signals that skip the registry).
+    """
+    span = max(CONF_SIZING_CEILING - CONFIDENCE_THRESHOLD, 1.0)
+    conf_frac = max(0.0, min((confidence - CONFIDENCE_THRESHOLD) / span, 1.0))
+    tight = tightness if tightness is not None else 0.5
+    conviction = 0.6 * conf_frac + 0.4 * tight
+    return round(MIN_NOTIONAL + conviction * (MAX_NOTIONAL - MIN_NOTIONAL), 2)
+
+
+def risk_gate(db, ticker: str, dry_run: bool) -> tuple[bool, str]:
+    """
+    Portfolio-level guardrails checked before opening a new position.
+    Returns (allowed, reason). Exits and same-ticker reversals are not gated
+    here — they don't add a new position slot.
+    """
+    already_tracked = db.execute(
+        text("SELECT 1 FROM managed_positions WHERE ticker = :t"), {"t": ticker}
+    ).fetchone()
+
+    if not already_tracked:
+        open_count = db.execute(
+            text("SELECT COUNT(*) FROM managed_positions")
+        ).scalar() or 0
+        if open_count >= MAX_OPEN_POSITIONS:
+            return False, f"max open positions reached ({open_count}/{MAX_OPEN_POSITIONS})"
+
+    if dry_run:
+        return True, ""
+
+    # Daily-loss kill switch — Alpaca tracks equity vs the prior close.
+    try:
+        acct = _trading_client().get_account()
+        daily_pl = float(acct.equity) - float(acct.last_equity)
+        if daily_pl <= -MAX_DAILY_LOSS:
+            return False, f"daily loss limit hit (P&L ${daily_pl:,.0f})"
+    except Exception as e:
+        log.warning("  risk check: could not read account (%s) — allowing trade", e)
+
+    return True, ""
+
+
+def place_order(ticker: str, direction: str, notional: float,
+                dry_run: bool) -> str | None:
+    """Place a paper market order. Returns Alpaca order ID or None on dry-run."""
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce
+
+    if dry_run:
+        return None
+
+    tc   = _trading_client()
     side = OrderSide.BUY if direction == "Up" else OrderSide.SELL
 
     # Position management
@@ -315,7 +470,7 @@ def place_order(ticker: str, direction: str, dry_run: bool) -> str | None:
 
     if side == OrderSide.BUY:
         order_req = MarketOrderRequest(
-            symbol=ticker, notional=TRADE_NOTIONAL,
+            symbol=ticker, notional=notional,
             side=side, time_in_force=TimeInForce.DAY,
         )
     else:
@@ -331,7 +486,7 @@ def place_order(ticker: str, direction: str, dry_run: bool) -> str | None:
         except Exception:
             price = 100.0
         order_req = MarketOrderRequest(
-            symbol=ticker, qty=max(1, int(TRADE_NOTIONAL / price)),
+            symbol=ticker, qty=max(1, int(notional / price)),
             side=side, time_in_force=TimeInForce.DAY,
         )
 
@@ -343,7 +498,8 @@ def log_trade(db, ceo: str, tweet_text: str, tweet_date, topic: str,
               ticker: str, direction: str, confidence: float,
               tightness: float | None, sentiment: float,
               order_id: str | None, status: str,
-              side_str: str, skip_reason: str | None = None):
+              side_str: str, skip_reason: str | None = None,
+              notional: float = TRADE_NOTIONAL):
     db.execute(
         text("""
             INSERT INTO paper_trades
@@ -362,7 +518,7 @@ def log_trade(db, ceo: str, tweet_text: str, tweet_date, topic: str,
             "topic":      topic,
             "ticker":     ticker,
             "side":       side_str,
-            "notional":   TRADE_NOTIONAL,
+            "notional":   notional,
             "direction":  direction,
             "conf":       confidence,
             "sent":       sentiment,
@@ -375,19 +531,104 @@ def log_trade(db, ceo: str, tweet_text: str, tweet_date, topic: str,
 
 
 # ---------------------------------------------------------------------------
+# Position lifecycle — scheduled exit at the next-day prediction horizon
+# ---------------------------------------------------------------------------
+
+def register_position(db, ticker: str, side: str, ceo: str, topic: str,
+                      confidence: float, exit_after: datetime):
+    """Record (or refresh) an open position so it can be closed at its horizon."""
+    db.execute(
+        text("""
+            INSERT INTO managed_positions
+                (ticker, side, ceo, topic, opened_at, exit_after, entry_confidence)
+            VALUES (:ticker, :side, :ceo, :topic, NOW(), :exit_after, :conf)
+            ON CONFLICT (ticker) DO UPDATE SET
+                side             = EXCLUDED.side,
+                ceo              = EXCLUDED.ceo,
+                topic            = EXCLUDED.topic,
+                opened_at        = NOW(),
+                exit_after       = EXCLUDED.exit_after,
+                entry_confidence = EXCLUDED.entry_confidence
+        """),
+        {"ticker": ticker, "side": side, "ceo": ceo, "topic": topic,
+         "exit_after": exit_after, "conf": confidence},
+    )
+
+
+def close_due_positions(dry_run: bool):
+    """
+    Close any tracked position whose next-day exit horizon has passed.
+    Runs only during market hours (a market order needs an open market).
+    """
+    now_et = datetime.now(ET)
+    if market_status(now_et) != "open":
+        return
+
+    db = Session()
+    try:
+        rows = db.execute(
+            text("""
+                SELECT ticker, side, ceo, topic FROM managed_positions
+                WHERE exit_after <= NOW()
+            """)
+        ).fetchall()
+        if not rows:
+            return
+
+        tc = None if dry_run else _trading_client()
+        for r in rows:
+            ticker = r.ticker
+            exit_side = "sell" if r.side == "long" else "buy_to_cover"
+            try:
+                if not dry_run:
+                    tc.close_position(ticker)
+                log.info(
+                    "%sEXIT %s (%s/%s) — closed at next-day horizon",
+                    "[DRY-RUN] " if dry_run else "", ticker, r.ceo, r.topic,
+                )
+                log_trade(db, r.ceo, "", None, r.topic, ticker,
+                          "exit", 0.0, None, 0.0, None,
+                          "exit" if not dry_run else "dry-run-exit", exit_side,
+                          skip_reason="scheduled next-day horizon exit")
+                db.execute(text("DELETE FROM managed_positions WHERE ticker = :t"),
+                           {"t": ticker})
+            except Exception as e:
+                msg = str(e).lower()
+                log.error("  Exit failed for %s: %s", ticker, e)
+                # Position already gone at the broker — stop tracking it.
+                if "position does not exist" in msg or "not found" in msg or "404" in msg:
+                    db.execute(text("DELETE FROM managed_positions WHERE ticker = :t"),
+                               {"t": ticker})
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.error("Exit sweep error: %s", e)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Signal evaluation pipeline for a single tweet row
 # ---------------------------------------------------------------------------
 
-def evaluate_tweet(row: pd.Series, ceo: str, db) -> dict | None:
+def evaluate_tweet(row: pd.Series, ceo: str, db,
+                   proc=None, stocks_cache: dict | None = None) -> dict | None:
     """
     Run the full signal pipeline on one tweet.
     Returns a signal dict if the tweet passes all gates, else None.
+
+    proc         — shared DataProcessor instance (created once per poll cycle)
+    stocks_cache — dict keyed by ticker; avoids re-fetching the same 60-day
+                   window for multiple tweets mapped to the same stock
     """
     from classifier import get_tweet_topic
     from pipeline_utils import compute_technicals
     from model.predict import predict_tweets
     from targets import HANDLE_TO_TICKER
     from processor import DataProcessor
+
+    if stocks_cache is None:
+        stocks_cache = {}
 
     tweet_text = str(row.get("text") or "")
     sentiment  = float(row.get("sentiment") or 0)
@@ -397,6 +638,48 @@ def evaluate_tweet(row: pd.Series, ceo: str, db) -> dict | None:
     topic = get_tweet_topic(tweet_text, ceo)
     if topic == "personal":
         return None
+
+    # Fast path — congressional trade disclosures: skip registry and ML entirely.
+    # The ticker and direction are explicit in the post; confidence is fixed at 80%.
+    if topic == "congressional_trade":
+        from classifier import parse_congressional_trade
+        trade = parse_congressional_trade(tweet_text)
+        if trade is None:
+            return None
+        log.info("  CONGRESSIONAL TRADE: %s → %s (%s)", ceo, trade["ticker"], trade["direction"])
+        return {
+            "ceo":        ceo,
+            "tweet_text": tweet_text,
+            "tweet_date": tweet_date,
+            "topic":      topic,
+            "ticker":     trade["ticker"],
+            "tightness":  1.0,
+            "direction":  trade["direction"],
+            "confidence": 80.0,
+            "sentiment":  sentiment,
+            "finbert":    float(finbert) if finbert is not None else None,
+        }
+
+    # Fast path — short-seller report: a published report is a strong DOWN signal
+    # on the named ticker. Skip registry and ML; the ticker comes from the post.
+    if topic == "short_report":
+        from classifier import parse_short_seller_report
+        rep = parse_short_seller_report(tweet_text)
+        if rep is None:
+            return None
+        log.info("  SHORT REPORT: %s → %s (Down)", ceo, rep["ticker"])
+        return {
+            "ceo":        ceo,
+            "tweet_text": tweet_text,
+            "tweet_date": tweet_date,
+            "topic":      topic,
+            "ticker":     rep["ticker"],
+            "tightness":  1.0,
+            "direction":  "Down",
+            "confidence": 75.0,
+            "sentiment":  sentiment,
+            "finbert":    float(finbert) if finbert is not None else None,
+        }
 
     # Registry lookup
     rel = db.execute(
@@ -415,20 +698,21 @@ def evaluate_tweet(row: pd.Series, ceo: str, db) -> dict | None:
     if not ticker:
         return None
 
-    # ML prediction — fetch technicals, fall back to empty DF if data API is
-    # unavailable (e.g. GitHub Actions). Model imputes RSI/ATR with training medians.
-    end_dt   = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=60)
-    try:
-        proc      = DataProcessor()
-        stocks_df = proc.get_stocks(ticker, start_date=start_dt, end_date=end_dt)
-        stocks_df = compute_technicals(stocks_df)
-    except Exception as _stock_err:
-        log.debug("  Stock data unavailable for %s (%s) — using empty DF", ticker, _stock_err)
-        stocks_df = pd.DataFrame(
-            columns=["date_only", "close", "open", "high", "low",
-                     "volume", "rsi_14", "atr_14"]
-        )
+    # Fetch technicals once per ticker per cycle, reuse across tweets
+    if ticker not in stocks_cache:
+        end_dt   = datetime.now(timezone.utc) - timedelta(days=1)
+        start_dt = end_dt - timedelta(days=60)
+        try:
+            _proc = proc if proc is not None else DataProcessor()
+            df = _proc.get_stocks(ticker, start_date=start_dt, end_date=end_dt)
+            stocks_cache[ticker] = compute_technicals(df)
+        except Exception as _stock_err:
+            log.debug("  Stock data unavailable for %s (%s) — using empty DF", ticker, _stock_err)
+            stocks_cache[ticker] = pd.DataFrame(
+                columns=["date_only", "close", "open", "high", "low",
+                         "volume", "rsi_14", "atr_14"]
+            )
+    stocks_df = stocks_cache[ticker]
 
     dt = pd.to_datetime(tweet_date)
     if dt.tzinfo is None:
@@ -512,8 +796,44 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
     side_str   = "buy" if direction == "Up" else "sell_short"
     prefix     = "[DRY-RUN] " if dry_run else ""
 
+    # Idempotency — never trade the same tweet twice. Guards against retries and
+    # against two watcher deployments (the Render worker and the GitHub Actions
+    # db-only run) both processing the same signal.
+    if not dry_run and tweet_date is not None:
+        td_str = str(tweet_date)[:19]
+        dup = db.execute(
+            text("""
+                SELECT 1 FROM paper_trades
+                WHERE ceo = :ceo AND ticker = :ticker AND tweet_date = :td
+                  AND status = 'placed'
+                LIMIT 1
+            """),
+            {"ceo": ceo, "ticker": ticker, "td": td_str},
+        ).fetchone()
+        if dup:
+            log.info("  %s %s/%s already traded for this tweet — skipping duplicate",
+                     ceo, topic, ticker)
+            if "id" in sig:
+                mark_signal_processed(db, sig["id"], None)
+            return
+
+    # Portfolio risk caps — block new entries past position/loss limits.
+    allowed, reason = risk_gate(db, ticker, dry_run)
+    if not allowed:
+        log.warning("  RISK HALT — %s %s/%s skipped: %s", ceo, topic, ticker, reason)
+        log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
+                  direction, confidence, tightness, sentiment,
+                  None, "skipped", side_str, skip_reason=f"risk: {reason}",
+                  notional=0.0)
+        if "id" in sig:
+            mark_signal_processed(db, sig["id"], None)
+        return
+
+    # Conviction-scaled position size
+    notional = position_notional(confidence, tightness)
+
     try:
-        order_id = place_order(ticker, direction, dry_run)
+        order_id = place_order(ticker, direction, notional, dry_run)
 
         if order_id == "DUPLICATE":
             log.info(
@@ -524,20 +844,28 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
             log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
                       direction, confidence, tightness, sentiment,
                       None, "skipped", side_str,
-                      skip_reason="already positioned same side")
+                      skip_reason="already positioned same side", notional=0.0)
         else:
             log.info(
-                "%s%s %s → %s (%s) conf=%.1f%% tight=%s — ORDER %s%s",
+                "%s%s %s → %s (%s) conf=%.1f%% tight=%s size=$%.0f — ORDER %s%s",
                 prefix, ceo, topic, ticker, direction, confidence,
-                f"{tightness:.3f}" if tightness else "n/a",
+                f"{tightness:.3f}" if tightness else "n/a", notional,
                 "PLACED" if not dry_run else "WOULD PLACE",
                 f" id={order_id}" if order_id else "",
             )
             log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
                       direction, confidence, tightness, sentiment,
-                      order_id, "placed" if not dry_run else "dry-run", side_str)
+                      order_id, "placed" if not dry_run else "dry-run", side_str,
+                      notional=notional)
             if not dry_run:
                 increment_trades(db, ceo)
+                # Track the open position so it's closed at the next-day horizon
+                register_position(
+                    db, ticker,
+                    "long" if direction == "Up" else "short",
+                    ceo, topic, confidence,
+                    next_day_exit_time(datetime.now(ET)),
+                )
 
         # Mark queue entry processed if it came from the queue
         if "id" in sig:
@@ -547,7 +875,10 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
         log.error("  Order failed for %s/%s: %s", ceo, ticker, e)
         log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
                   direction, confidence, tightness, sentiment,
-                  None, "error", side_str, skip_reason=str(e))
+                  None, "error", side_str, skip_reason=str(e), notional=notional)
+        # Always retire the queue entry on failure — don't retry indefinitely
+        if "id" in sig:
+            mark_signal_processed(db, sig["id"], None)
 
 
 # ---------------------------------------------------------------------------
@@ -562,13 +893,16 @@ def poll_from_db(ceo_list: list[str], dry_run: bool):
     (e.g. GitHub Actions).
 
     DB rows already have finbert_score, sentiment_score, engagement columns —
-    no transformers or tweety-ns required.
+    no transformers or twikit required.
     """
     now_et = datetime.now(ET)
     status = market_status(now_et)
     db     = Session()
 
     try:
+        from processor import DataProcessor
+        proc         = DataProcessor()
+        stocks_cache = {}
         new_signal_count = 0
 
         for ceo in ceo_list:
@@ -636,10 +970,10 @@ def poll_from_db(ceo_list: list[str], dry_run: bool):
                 ) if not all_eng_df.empty else 0.0
 
                 for _, row in new_df.iterrows():
-                    if not passes_gates(row, eng_threshold):
+                    if not passes_gates(row, eng_threshold, ceo):
                         continue
 
-                    signal = evaluate_tweet(row, ceo, db)
+                    signal = evaluate_tweet(row, ceo, db, proc=proc, stocks_cache=stocks_cache)
                     if signal is None:
                         continue
 
@@ -698,6 +1032,76 @@ def poll_from_db(ceo_list: list[str], dry_run: bool):
 
 
 # ---------------------------------------------------------------------------
+# Congressional trades — trade newly disclosed filings from congress_trades
+# (populated by congress_ingest.py). Structured data: ticker + direction are
+# explicit, so this bypasses the registry/ML entirely, like the tweet fast-path.
+# ---------------------------------------------------------------------------
+
+def poll_congress_trades(dry_run: bool):
+    now_et = datetime.now(ET)
+    status = market_status(now_et)
+    cutoff = (now_et.date() - timedelta(days=CONGRESS_RECENCY_DAYS)).isoformat()
+
+    db = Session()
+    try:
+        rows = db.execute(
+            text("""
+                SELECT id, chamber, member, ticker, direction, txn_type,
+                       disclosure_date, amount
+                FROM congress_trades
+                WHERE processed = FALSE AND disclosure_date >= :cutoff
+                ORDER BY disclosure_date ASC
+            """),
+            {"cutoff": cutoff},
+        ).fetchall()
+
+        # Retire disclosures too old to act on so they don't linger unprocessed.
+        db.execute(
+            text("""
+                UPDATE congress_trades SET processed = TRUE
+                WHERE processed = FALSE AND disclosure_date < :cutoff
+            """),
+            {"cutoff": cutoff},
+        )
+
+        if not rows:
+            db.commit()
+            return
+
+        log.info("Congress: %d newly disclosed trade(s) to act on", len(rows))
+        for r in rows:
+            sig = {
+                "ceo":        f"congress:{r.member}"[:64],
+                "tweet_text": f"{r.member} {r.txn_type} {r.ticker} ({r.amount}) disclosed {r.disclosure_date}",
+                "tweet_date": r.disclosure_date,
+                "topic":      "congressional_trade",
+                "ticker":     r.ticker,
+                "tightness":  1.0,
+                "direction":  r.direction,
+                "confidence": CONGRESS_CONFIDENCE,
+                "sentiment":  0.0,
+                "finbert":    None,
+            }
+            if status == "open":
+                log.info("  CONGRESS %s → %s %s [MARKET OPEN — trading]",
+                         r.member, r.direction, r.ticker)
+                _execute_signal(sig, db, dry_run)
+            else:
+                log.info("  CONGRESS %s → %s %s [market %s — queuing]",
+                         r.member, r.direction, r.ticker, status)
+                enqueue_signal(db, sig)
+            db.execute(text("UPDATE congress_trades SET processed = TRUE WHERE id = :id"),
+                       {"id": r.id})
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.error("Congress poll error: %s", e)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # One polling cycle (Twitter mode)
 # ---------------------------------------------------------------------------
 
@@ -710,7 +1114,8 @@ async def poll_once(ceo_list: list[str], dry_run: bool):
 
     db = Session()
     try:
-        proc = DataProcessor()
+        proc         = DataProcessor()
+        stocks_cache = {}
         new_signal_count = 0
 
         for ceo in ceo_list:
@@ -747,11 +1152,11 @@ async def poll_once(ceo_list: list[str], dry_run: bool):
                 )
 
                 for _, row in new_df.iterrows():
-                    if not passes_gates(row, eng_threshold):
+                    if not passes_gates(row, eng_threshold, ceo):
                         log.debug("  tweet failed gates, skip")
                         continue
 
-                    signal = evaluate_tweet(row, ceo, db)
+                    signal = evaluate_tweet(row, ceo, db, proc=proc, stocks_cache=stocks_cache)
                     if signal is None:
                         continue
 
@@ -824,6 +1229,7 @@ async def run(ceo_list: list[str], dry_run: bool, interval_override: int | None,
         log.info("DRY-RUN mode — signals will be evaluated but no orders placed")
 
     _queued_open_processed = False
+    _last_full_poll_et     = None  # tracks when we last ran the full account sweep
 
     while True:
         now_et = datetime.now(ET)
@@ -836,20 +1242,47 @@ async def run(ceo_list: list[str], dry_run: bool, interval_override: int | None,
         elif status != "open":
             _queued_open_processed = False
 
-        # Poll — DB-only skips Twitter entirely
-        if db_only:
-            poll_from_db(ceo_list, dry_run)
+        # Two-tier polling during market hours:
+        #   Fast lane  (every 3 min)  — HIGH_PRIORITY_HANDLES only
+        #   Full sweep (every 20 min) — all accounts
+        # Outside market hours we always do a full sweep at the slower cadence.
+        if status == "open" and not interval_override:
+            full_due = (
+                _last_full_poll_et is None
+                or (now_et - _last_full_poll_et).total_seconds() >= POLL_MARKET_HOURS_S
+            )
+            if full_due:
+                poll_list = ceo_list
+                _last_full_poll_et = now_et
+                log.info("Full sweep (%d accounts)", len(poll_list))
+            else:
+                poll_list = [c for c in ceo_list if c in HIGH_PRIORITY_HANDLES]
+                if poll_list:
+                    log.info("Fast-lane poll (%d HP accounts: %s)",
+                             len(poll_list), ", ".join(poll_list))
         else:
-            await poll_once(ceo_list, dry_run)
+            poll_list = ceo_list
+
+        if poll_list:
+            if db_only:
+                poll_from_db(poll_list, dry_run)
+            else:
+                await poll_once(poll_list, dry_run)
+
+        # Trade newly disclosed congressional filings (from congress_ingest.py)
+        poll_congress_trades(dry_run)
+
+        # Close any positions that have reached their next-day exit horizon
+        close_due_positions(dry_run)
 
         if once:
             break
 
-        # Dynamic sleep
+        # Sleep duration
         if interval_override:
             sleep_s = interval_override
         elif status == "open":
-            sleep_s = POLL_MARKET_HOURS_S
+            sleep_s = POLL_HIGH_PRIORITY_S   # wake every 3 min; full sweep governed by _last_full_poll_et
         elif status in ("pre", "post"):
             sleep_s = POLL_EXTENDED_S
         else:

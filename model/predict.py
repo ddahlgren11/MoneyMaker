@@ -20,8 +20,41 @@ from pipeline_utils import shift_weekend_to_monday
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "trained_model.pkl")
 
-_vix_cache = {}   # (start_iso, end_iso) → {date: float}
-_earnings_cache = {}  # ticker → set of "YYYY-MM-DD"
+_model = None
+_vix_cache = {}           # month_key → {date: float}
+_earnings_cache = {}      # ticker → set of "YYYY-MM-DD"
+_news_sentiment_cache = {}  # (ticker, date_iso) → float | None
+
+
+def _get_model():
+    global _model
+    if _model is None:
+        if not os.path.exists(MODEL_PATH):
+            raise FileNotFoundError(
+                f"No trained model found at {MODEL_PATH}. "
+                "Run 'python3 model/baseline.py' first to train and save it."
+            )
+        _model = joblib.load(MODEL_PATH)
+    return _model
+
+
+def _get_live_news_sentiment(ticker: str, target_date) -> float | None:
+    """Fetch Finnhub news sentiment for ticker on target_date, cached by (ticker, date)."""
+    date_iso = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)[:10]
+    cache_key = (ticker, date_iso)
+    if cache_key in _news_sentiment_cache:
+        return _news_sentiment_cache[cache_key]
+    try:
+        from context import _finnhub_news
+        from classifier import get_sentiment_score
+        import datetime as _dt
+        target = _dt.date.fromisoformat(date_iso)
+        articles = _finnhub_news(ticker, target - timedelta(days=1), target + timedelta(days=1), limit=10)
+        result = round(sum(get_sentiment_score(a["title"]) for a in articles) / len(articles), 4) if articles else None
+    except Exception:
+        result = None
+    _news_sentiment_cache[cache_key] = result
+    return result
 
 
 def _get_vix(target_date):
@@ -125,7 +158,7 @@ def _build_feature_row(tweet_row, stocks_df, ticker=None):
         "vix_at_tweet":         _get_vix(target_date_only),
         "days_to_earnings":     _get_days_to_earnings(ticker, target_date_only) if ticker else None,
         "prev_day_direction":   prev_day_direction,
-        "news_sentiment_score": None,  # fetched live via get_news_for_date if needed; imputer fills with median
+        "news_sentiment_score": _get_live_news_sentiment(ticker, target_date_only) if ticker else None,
         "refined_sentiment":    get_refined_sentiment(sentiment),
         "tone_category":        get_tone_category(text, sentiment),
         "tweet_type":           get_tweet_type(text),
@@ -145,13 +178,7 @@ def predict_tweets(tweets_df, stocks_df, ticker=None):
         predicted_direction  — "Up" or "Down"
         confidence_pct       — model's confidence as a percentage (e.g. 64.2)
     """
-    if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(
-            f"No trained model found at {MODEL_PATH}. "
-            "Run 'python3 model/baseline.py' first to train and save it."
-        )
-
-    model = joblib.load(MODEL_PATH)
+    model = _get_model()
 
     feature_rows = [_build_feature_row(row, stocks_df, ticker=ticker) for _, row in tweets_df.iterrows()]
     features_df = pd.DataFrame(feature_rows)

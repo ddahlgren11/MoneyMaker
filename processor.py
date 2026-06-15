@@ -1,23 +1,10 @@
 import os
+import json
+import logging
 import asyncio
 import pandas as pd
 from datetime import datetime, timezone, timedelta
-from tweety import Twitter
-import tweety.transaction
-
-# Runtime patch to fix tweety-ns throwing "Couldn't get animation key indices" error
-original_get_indices = tweety.transaction.TransactionGenerator.get_indices
-
-def patched_get_indices(self, home_page_html=None):
-    try:
-        return original_get_indices(self, home_page_html)
-    except Exception as e:
-        if "Couldn't get animation key indices" in str(e):
-            return 0, [1, 2, 3, 4, 5]
-        raise
-
-tweety.transaction.TransactionGenerator.get_indices = patched_get_indices
-
+from twikit import Client as TwikitClient
 from classifier import get_sentiment_score, get_finbert_scores_batch
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -26,12 +13,60 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+log = logging.getLogger("processor")
+
+COOKIES_PATH = os.path.join(os.path.dirname(__file__), "twitter_cookies.json")
+
+
+class TwitterAuthError(RuntimeError):
+    """Raised when Twitter cookies are missing, malformed, or expired."""
+
+
+def _load_twitter_cookies(client) -> bool:
+    """
+    Load and sanity-check twitter_cookies.json. Returns True only if usable
+    cookies were loaded. Every failure path logs a clear, actionable message —
+    a silent failure here is what froze tweet ingestion for months.
+    """
+    if not os.path.exists(COOKIES_PATH):
+        log.warning(
+            "Twitter cookies not found at %s — tweet fetching is DISABLED. "
+            "Generate them with `python3 test_twitter_cookies.py <auth_token> <ct0>` "
+            "(see README: Twitter cookie setup).", COOKIES_PATH,
+        )
+        return False
+    try:
+        with open(COOKIES_PATH) as f:
+            cookies = json.load(f)
+    except Exception as e:
+        log.error("Twitter cookies at %s are not valid JSON (%s) — regenerate them.",
+                  COOKIES_PATH, e)
+        return False
+    missing = [k for k in ("auth_token", "ct0") if not cookies.get(k)]
+    if missing:
+        log.error("Twitter cookies at %s missing required keys %s — regenerate them.",
+                  COOKIES_PATH, missing)
+        return False
+    try:
+        client.load_cookies(COOKIES_PATH)
+    except Exception as e:
+        log.error("twikit failed to load cookies from %s (%s) — regenerate them.",
+                  COOKIES_PATH, e)
+        return False
+    log.info("Twitter cookies loaded from %s", COOKIES_PATH)
+    return True
+
+
 class DataProcessor:
     def __init__(self):
-        self.twitter_client = Twitter("session")
+        self.twitter_client = TwikitClient("en-US")
+        self.cookies_loaded = _load_twitter_cookies(self.twitter_client)
+        # Market-data client works with either live or paper keys (free IEX feed).
+        # Prefer live data keys (set in the retrain workflow); fall back to paper
+        # keys (set in the watcher workflow) so both environments work.
         self.stock_client = StockHistoricalDataClient(
-            os.getenv("ALPACA_API_KEY"),
-            os.getenv("ALPACA_SECRET_KEY")
+            os.getenv("ALPACA_API_KEY") or os.getenv("ALPACA_PAPER_API_KEY"),
+            os.getenv("ALPACA_SECRET_KEY") or os.getenv("ALPACA_PAPER_SECRET_KEY"),
         )
 
     @staticmethod
@@ -43,31 +78,58 @@ class DataProcessor:
             return 0
 
     async def get_tweets(self, username, pages=50):
+        if not self.cookies_loaded:
+            raise TwitterAuthError(
+                "Twitter cookies missing or invalid — cannot fetch tweets. "
+                "Regenerate twitter_cookies.json (see README: Twitter cookie setup)."
+            )
         all_tweets = []
-        user_tweets = await self.twitter_client.get_tweets(username, pages=pages)
-        for tweet in user_tweets:
-            # Skip retweets — they reflect someone else's words, not the CEO's
-            if tweet.is_retweet:
-                continue
+        try:
+            user = await self.twitter_client.get_user_by_screen_name(username)
+            result = await self.twitter_client.get_user_tweets(user.id, tweet_type="Tweets", count=20)
+        except Exception as e:
+            msg = str(e).lower()
+            if any(s in msg for s in ("401", "unauthorized", "forbidden",
+                                      "could not authenticate", "logged out", "denied")):
+                raise TwitterAuthError(
+                    f"Twitter auth rejected while fetching @{username} ({e}). "
+                    "Cookies are likely expired — regenerate twitter_cookies.json."
+                ) from e
+            raise
 
-            created = tweet.created_on
-            tweet_hour = created.hour if hasattr(created, 'hour') else 0
-            tweet_minute = created.minute if hasattr(created, 'minute') else 0
-            # NYSE opens 9:30 ET = 14:30 UTC, closes 16:00 ET = 21:00 UTC
-            is_premarket = tweet_hour < 14 or (tweet_hour == 14 and tweet_minute < 30)
+        for page_num in range(pages):
+            for tweet in result:
+                # Skip retweets — they reflect someone else's words, not the CEO's
+                if tweet.retweeted_tweet is not None:
+                    continue
 
-            all_tweets.append({
-                'ceo': username,
-                'text': tweet.text,
-                'sentiment': get_sentiment_score(tweet.text),
-                'date': created,
-                'likes': self._safe_int(tweet.likes),
-                'retweet_count': self._safe_int(tweet.retweet_counts),
-                'view_count': self._safe_int(tweet.views),
-                'reply_count': self._safe_int(tweet.reply_counts),
-                'tweet_hour': tweet_hour,
-                'is_premarket': is_premarket,
-            })
+                created = tweet.created_at_datetime
+                if created and created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                tweet_hour = created.hour if created else 0
+                tweet_minute = created.minute if created else 0
+                # NYSE opens 9:30 ET = 14:30 UTC, closes 16:00 ET = 21:00 UTC
+                is_premarket = tweet_hour < 14 or (tweet_hour == 14 and tweet_minute < 30)
+
+                all_tweets.append({
+                    'ceo': username,
+                    'text': tweet.full_text or tweet.text,
+                    'sentiment': get_sentiment_score(tweet.full_text or tweet.text),
+                    'date': created,
+                    'likes': self._safe_int(tweet.favorite_count),
+                    'retweet_count': self._safe_int(tweet.retweet_count),
+                    'view_count': self._safe_int(tweet.view_count),
+                    'reply_count': self._safe_int(tweet.reply_count),
+                    'tweet_hour': tweet_hour,
+                    'is_premarket': is_premarket,
+                })
+
+            if page_num < pages - 1:
+                try:
+                    result = await result.next()
+                except Exception:
+                    break  # no more pages
+
         df = pd.DataFrame(all_tweets)
         if not df.empty:
             df['finbert_score'] = get_finbert_scores_batch(df['text'].tolist())
