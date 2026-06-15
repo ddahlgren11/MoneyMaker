@@ -44,7 +44,7 @@ fchollet,Francois Chollet,tech_executive,Google AI researcher - AI benchmark and
 emollick,Ethan Mollick,tech_executive,Wharton AI professor - AI adoption signals
 zuck,Mark Zuckerberg,tech_executive,Meta CEO - product and business signals
 jonyivegroupie,Jony Ive,tech_executive,Former Apple designer - Apple product signals
-BobIger,Robert Iger,tech_executive,Disney CEO - already tracked as RobertIger
+# BobIger removed — Robert Iger already tracked as RobertIger in main targets
 Piyasena,Elon Musk,tech_executive,Already tracked as elonmusk
 naval,Naval Ravikant,investor,AngelList founder - tech and crypto sentiment
 paulg,Paul Graham,investor,YCombinator - startup and tech signals
@@ -105,3 +105,8 @@ RobertKiyosaki,Robert Kiyosaki,investor,Rich Dad Poor Dad - gold and crypto sent
 mikenovogratz,Mike Novogratz,crypto,Galaxy Digital CEO - institutional crypto
 GrayscaleBTC,Grayscale,crypto,Bitcoin trust - institutional crypto flows
 coinbasedevs,Coinbase,tech_executive,Already tracked as brian_armstrong
+quiver_quant,Quiver Quantitative,congressional,SUSPENDED on X - skip
+capitoltrades,Capitol Trades,congressional,Congressional STOCK Act disclosure aggregator - posts every disclosed trade
+realDonaldTrump,Donald Trump,policy,US President - tariff announcements and trade policy move entire sectors immediately
+POTUS,POTUS (official),policy,Official White House account - executive orders and policy statements
+ScottBessent,Scott Bessent,policy,US Treasury Secretary - dollar policy rates and debt commentary move TLT and XLF

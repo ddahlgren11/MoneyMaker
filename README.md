@@ -17,7 +17,7 @@ MoneyMaker answers that question with real data. It collects tweets from 24 high
 | Frontend | Streamlit, Plotly |
 | ML / NLP | scikit-learn, VADER, FinBERT (HuggingFace `ProsusAI/finbert`), pandas, numpy |
 | Database | Neon (serverless PostgreSQL), psycopg2 |
-| Data sources | Twitter/X (tweety-ns), Alpaca Markets, Alpha Vantage, Finnhub, yfinance |
+| Data sources | Twitter/X (twikit, cookie auth), Alpaca Markets, Alpha Vantage, Finnhub, yfinance |
 | CI/CD | GitHub Actions (scheduled daily retraining) |
 | Hosting | Streamlit Community Cloud |
 
@@ -142,10 +142,17 @@ pip install -r requirements.txt
 
 # 2. Create .env in the project root (see .env.example)
 DATABASE_URL=your_neon_postgres_connection_url
-ALPACA_API_KEY=your_alpaca_api_key
+ALPACA_API_KEY=your_alpaca_api_key                  # market data (live keys)
 ALPACA_SECRET_KEY=your_alpaca_secret_key
+ALPACA_PAPER_API_KEY=your_alpaca_paper_api_key      # paper trading (watch.py / trade.py)
+ALPACA_PAPER_SECRET_KEY=your_alpaca_paper_secret_key
 FINNHUB_API_KEY=your_finnhub_api_key          # optional
 ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key  # optional
+
+# 2b. Generate Twitter cookies for twikit (no paid API needed).
+#     Grab auth_token and ct0 from your logged-in x.com browser cookies, then:
+python3 test_twitter_cookies.py <auth_token> <ct0>   # writes twitter_cookies.json
+#     For GitHub Actions, paste the file's contents into the TWITTER_COOKIES repo secret.
 
 # 3. Start the FastAPI backend
 uvicorn main:app --reload           # http://localhost:8000 · docs at /docs

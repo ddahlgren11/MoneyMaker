@@ -41,6 +41,20 @@ jobs:
           echo "Prefix: ${DATABASE_URL:0:30}"
           python3 -c "import os; url=os.environ.get('DATABASE_URL',''); print('repr prefix:', repr(url[:40]))"
 
+      - name: Write Twitter cookies
+        # twikit authenticates with browser cookies instead of a paid API key.
+        # Store the contents of a locally generated twitter_cookies.json
+        # (see test_twitter_cookies.py) as the TWITTER_COOKIES repo secret.
+        env:
+          TWITTER_COOKIES: ${{ secrets.TWITTER_COOKIES }}
+        run: |
+          if [ -n "$TWITTER_COOKIES" ]; then
+            printf '%s' "$TWITTER_COOKIES" > twitter_cookies.json
+            echo "Wrote twitter_cookies.json ($(wc -c < twitter_cookies.json) bytes)"
+          else
+            echo "WARNING: TWITTER_COOKIES secret not set — tweet fetching will be skipped."
+          fi
+
       - name: Fetch fresh data (tweets + stocks + news)
         env:
           DATABASE_URL:          ${{ secrets.DATABASE_URL }}

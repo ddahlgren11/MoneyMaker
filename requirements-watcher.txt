@@ -12,5 +12,5 @@ requests
 pytz
 tzdata
 scipy
-tweety-ns
+twikit==2.3.3
 textblob

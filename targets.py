@@ -30,6 +30,14 @@ CEO_TARGETS = {
     "george_kurtz":    {"name": "George Kurtz",        "ticker": "CRWD"},
     "eldsjal":         {"name": "Daniel Ek",           "ticker": "SPOT"},
     "RJScaringe":      {"name": "RJ Scaringe",         "ticker": "RIVN"},
+    # Congressional trade aggregators — default to SPY until registry finds tighter fits.
+    # (quiver_quant omitted — account is suspended on X; see candidates.csv)
+    "unusual_whales":  {"name": "Unusual Whales",       "ticker": "SPY"},
+    "capitoltrades":   {"name": "Capitol Trades",       "ticker": "SPY"},
+    # Policy accounts — default to broad market until registry calibrates sector ETFs
+    "realDonaldTrump": {"name": "Donald Trump",         "ticker": "SPY"},
+    "POTUS":           {"name": "POTUS",                "ticker": "SPY"},
+    "ScottBessent":    {"name": "Scott Bessent",        "ticker": "TLT"},
 }
 
 # Flat handle → ticker dict for pipeline loops

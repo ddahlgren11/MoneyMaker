@@ -3,6 +3,7 @@ __pycache__/
 test.db
 session.tw_session
 cookies.json
+twitter_cookies.json
 streamlit.log
 *.log
 .streamlit/secrets.toml

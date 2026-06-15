@@ -9,7 +9,7 @@ tightness threshold get promoted to the live trading registry.
 Safety checks built in:
   - Minimum usable tweets gate (≥ 30 post-filter) before running analysis
   - Rate-limit-safe delays between pages and between accounts
-  - Exponential backoff on tweety-ns errors
+  - Exponential backoff on Twitter fetch errors
   - Progress tracked in DB — safe to interrupt and resume
   - Deduplication — won't add the same tweet twice
 
@@ -22,8 +22,8 @@ Usage:
     python3 discover.py --reset BillAckman     # re-queue a specific handle
     python3 discover.py --promote 0.20         # re-check and promote above threshold
 
-Note: runs locally only — needs session.tw_session from tweety-ns auth.
-      Not suitable for GitHub Actions (no persistent session file).
+Note: runs locally only — needs twitter_cookies.json from twikit auth
+      (see test_twitter_cookies.py to generate it).
 """
 
 import argparse
@@ -106,6 +106,16 @@ CATEGORY_UNIVERSE = {
     ],
     "media": [
         "SPY", "QQQ", "NVDA", "AAPL", "MSFT", "TSLA",
+    ],
+    "congressional": [
+        # Broad ETF sweep — relationship_analysis will find which sectors react
+        "SPY", "QQQ", "XLF", "XLE", "XLK", "XLI", "XLB", "ITA",
+        "SOXX", "TLT", "GLD", "EEM", "SLX",
+    ],
+    "policy": [
+        # Tariffs → industrials/semis/materials; rates → bonds/gold; defense → ITA
+        "SPY", "QQQ", "XLI", "SOXX", "XLB", "SLX", "XLE", "ITA",
+        "TLT", "GLD", "XLF", "EEM",
     ],
     "default": [
         "SPY", "QQQ", "NVDA", "AAPL", "MSFT", "TSLA", "COIN", "MSTR",
@@ -685,7 +695,7 @@ async def process_candidate(handle: str, name: str, category: str,
         log.info("  @%s: no tweets returned", handle)
         update_candidate(handle, status="insufficient_data",
                          tweets_fetched=0, usable_tweets=0,
-                         error_msg="No tweets returned from tweety-ns")
+                         error_msg="No tweets returned from Twitter")
         return
 
     fetched = len(tweets_df)

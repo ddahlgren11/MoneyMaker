@@ -8,7 +8,7 @@ immediately when a valid signal is detected.
 
 Flow (runs every POLL_INTERVAL seconds):
   For each CEO in the registry:
-    1. Fetch recent tweets via tweety-ns
+    1. Fetch recent tweets via twikit
     2. Identify tweets newer than last processed (dedup by date)
     3. Apply signal gates: engagement · FinBERT content · text length
     4. Classify tweet topic
@@ -48,9 +48,24 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-POLL_MARKET_HOURS_S  = 20 * 60   # 20 min during market hours
+POLL_MARKET_HOURS_S  = 20 * 60   # 20 min — full sweep of all accounts
+POLL_HIGH_PRIORITY_S =  3 * 60   # 3 min — fast lane for time-sensitive accounts
 POLL_EXTENDED_S      = 60 * 60   # 60 min pre/post market
 POLL_OVERNIGHT_S     = 4  * 60 * 60  # 4 hours overnight
+
+# Accounts polled every 3 min during market hours.
+# Short sellers publish rarely but move stocks 20-50% within minutes of posting.
+# Congressional aggregators and presidential accounts also move fast.
+HIGH_PRIORITY_HANDLES = {
+    # Short sellers — reports cause immediate, large moves
+    "HindenburgRes", "muddywaters", "CitronResearch", "GothamResearch", "PrestigeEconom1",
+    # Congressional trade aggregators — disclosures post continuously during market hours
+    "unusual_whales", "capitoltrades",
+    # Presidential / treasury — tariff tweets move sectors within minutes
+    "realDonaldTrump", "POTUS", "ScottBessent",
+    # Highest-signal CEO (tightness 0.57, 4.8% avg move)
+    "george_kurtz",
+}
 
 CONFIDENCE_THRESHOLD = 55.0
 TIGHTNESS_THRESHOLD  = 0.20
@@ -167,6 +182,17 @@ def increment_trades(db, ceo: str):
 
 
 def enqueue_signal(db, signal: dict):
+    existing = db.execute(
+        text("""
+            SELECT id FROM signal_queue
+            WHERE ceo = :ceo AND tweet_date = :tweet_date AND ticker = :ticker
+              AND processed = FALSE
+        """),
+        {"ceo": signal["ceo"], "tweet_date": signal["tweet_date"], "ticker": signal["ticker"]},
+    ).fetchone()
+    if existing:
+        log.debug("  signal already queued for %s/%s — skipping duplicate enqueue", signal["ceo"], signal["ticker"])
+        return
     db.execute(
         text("""
             INSERT INTO signal_queue
@@ -262,19 +288,29 @@ def _engagement_score(row: pd.Series) -> float:
     return likes + 2 * retweets + replies + 0.05 * views
 
 
-def passes_gates(row: pd.Series, eng_threshold: float) -> bool:
+def passes_gates(row: pd.Series, eng_threshold: float, ceo: str | None = None) -> bool:
+    from classifier import get_tweet_topic
+
     text = str(row.get("text") or row.get("tweet_text") or "")
     stripped = text.lower().replace("https://", "").replace("http://", "").strip()
     if len(stripped) < MIN_TEXT_LEN:
         return False
-    finbert = row.get("finbert_score")
-    if finbert is not None:
-        if abs(float(finbert)) < FINBERT_THRESHOLD:
-            return False
-    else:
-        # No FinBERT score available — fall back to VADER magnitude
-        if abs(float(row.get("sentiment") or row.get("sentiment_score") or 0)) < 0.15:
-            return False
+
+    # Congressional disclosures and policy statements are factual and low-sentiment
+    # by nature (e.g. "Rep. Pelosi purchased $1M-$5M of $NVDA"). The sentiment gate
+    # was tuned for opinionated CEO tweets and would wrongly discard them, so exempt
+    # those topics — the ticker/direction comes from the post itself, not sentiment.
+    topic = get_tweet_topic(text, ceo) if ceo else None
+    if topic not in ("congressional_trade", "policy"):
+        finbert = row.get("finbert_score")
+        if finbert is not None:
+            if abs(float(finbert)) < FINBERT_THRESHOLD:
+                return False
+        else:
+            # No FinBERT score available — fall back to VADER magnitude
+            if abs(float(row.get("sentiment") or row.get("sentiment_score") or 0)) < 0.15:
+                return False
+
     if _engagement_score(row) < eng_threshold:
         return False
     return True
@@ -378,16 +414,24 @@ def log_trade(db, ceo: str, tweet_text: str, tweet_date, topic: str,
 # Signal evaluation pipeline for a single tweet row
 # ---------------------------------------------------------------------------
 
-def evaluate_tweet(row: pd.Series, ceo: str, db) -> dict | None:
+def evaluate_tweet(row: pd.Series, ceo: str, db,
+                   proc=None, stocks_cache: dict | None = None) -> dict | None:
     """
     Run the full signal pipeline on one tweet.
     Returns a signal dict if the tweet passes all gates, else None.
+
+    proc         — shared DataProcessor instance (created once per poll cycle)
+    stocks_cache — dict keyed by ticker; avoids re-fetching the same 60-day
+                   window for multiple tweets mapped to the same stock
     """
     from classifier import get_tweet_topic
     from pipeline_utils import compute_technicals
     from model.predict import predict_tweets
     from targets import HANDLE_TO_TICKER
     from processor import DataProcessor
+
+    if stocks_cache is None:
+        stocks_cache = {}
 
     tweet_text = str(row.get("text") or "")
     sentiment  = float(row.get("sentiment") or 0)
@@ -397,6 +441,27 @@ def evaluate_tweet(row: pd.Series, ceo: str, db) -> dict | None:
     topic = get_tweet_topic(tweet_text, ceo)
     if topic == "personal":
         return None
+
+    # Fast path — congressional trade disclosures: skip registry and ML entirely.
+    # The ticker and direction are explicit in the post; confidence is fixed at 80%.
+    if topic == "congressional_trade":
+        from classifier import parse_congressional_trade
+        trade = parse_congressional_trade(tweet_text)
+        if trade is None:
+            return None
+        log.info("  CONGRESSIONAL TRADE: %s → %s (%s)", ceo, trade["ticker"], trade["direction"])
+        return {
+            "ceo":        ceo,
+            "tweet_text": tweet_text,
+            "tweet_date": tweet_date,
+            "topic":      topic,
+            "ticker":     trade["ticker"],
+            "tightness":  1.0,
+            "direction":  trade["direction"],
+            "confidence": 80.0,
+            "sentiment":  sentiment,
+            "finbert":    float(finbert) if finbert is not None else None,
+        }
 
     # Registry lookup
     rel = db.execute(
@@ -415,20 +480,21 @@ def evaluate_tweet(row: pd.Series, ceo: str, db) -> dict | None:
     if not ticker:
         return None
 
-    # ML prediction — fetch technicals, fall back to empty DF if data API is
-    # unavailable (e.g. GitHub Actions). Model imputes RSI/ATR with training medians.
-    end_dt   = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=60)
-    try:
-        proc      = DataProcessor()
-        stocks_df = proc.get_stocks(ticker, start_date=start_dt, end_date=end_dt)
-        stocks_df = compute_technicals(stocks_df)
-    except Exception as _stock_err:
-        log.debug("  Stock data unavailable for %s (%s) — using empty DF", ticker, _stock_err)
-        stocks_df = pd.DataFrame(
-            columns=["date_only", "close", "open", "high", "low",
-                     "volume", "rsi_14", "atr_14"]
-        )
+    # Fetch technicals once per ticker per cycle, reuse across tweets
+    if ticker not in stocks_cache:
+        end_dt   = datetime.now(timezone.utc) - timedelta(days=1)
+        start_dt = end_dt - timedelta(days=60)
+        try:
+            _proc = proc if proc is not None else DataProcessor()
+            df = _proc.get_stocks(ticker, start_date=start_dt, end_date=end_dt)
+            stocks_cache[ticker] = compute_technicals(df)
+        except Exception as _stock_err:
+            log.debug("  Stock data unavailable for %s (%s) — using empty DF", ticker, _stock_err)
+            stocks_cache[ticker] = pd.DataFrame(
+                columns=["date_only", "close", "open", "high", "low",
+                         "volume", "rsi_14", "atr_14"]
+            )
+    stocks_df = stocks_cache[ticker]
 
     dt = pd.to_datetime(tweet_date)
     if dt.tzinfo is None:
@@ -548,6 +614,9 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
         log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
                   direction, confidence, tightness, sentiment,
                   None, "error", side_str, skip_reason=str(e))
+        # Always retire the queue entry on failure — don't retry indefinitely
+        if "id" in sig:
+            mark_signal_processed(db, sig["id"], None)
 
 
 # ---------------------------------------------------------------------------
@@ -562,13 +631,16 @@ def poll_from_db(ceo_list: list[str], dry_run: bool):
     (e.g. GitHub Actions).
 
     DB rows already have finbert_score, sentiment_score, engagement columns —
-    no transformers or tweety-ns required.
+    no transformers or twikit required.
     """
     now_et = datetime.now(ET)
     status = market_status(now_et)
     db     = Session()
 
     try:
+        from processor import DataProcessor
+        proc         = DataProcessor()
+        stocks_cache = {}
         new_signal_count = 0
 
         for ceo in ceo_list:
@@ -636,10 +708,10 @@ def poll_from_db(ceo_list: list[str], dry_run: bool):
                 ) if not all_eng_df.empty else 0.0
 
                 for _, row in new_df.iterrows():
-                    if not passes_gates(row, eng_threshold):
+                    if not passes_gates(row, eng_threshold, ceo):
                         continue
 
-                    signal = evaluate_tweet(row, ceo, db)
+                    signal = evaluate_tweet(row, ceo, db, proc=proc, stocks_cache=stocks_cache)
                     if signal is None:
                         continue
 
@@ -710,7 +782,8 @@ async def poll_once(ceo_list: list[str], dry_run: bool):
 
     db = Session()
     try:
-        proc = DataProcessor()
+        proc         = DataProcessor()
+        stocks_cache = {}
         new_signal_count = 0
 
         for ceo in ceo_list:
@@ -747,11 +820,11 @@ async def poll_once(ceo_list: list[str], dry_run: bool):
                 )
 
                 for _, row in new_df.iterrows():
-                    if not passes_gates(row, eng_threshold):
+                    if not passes_gates(row, eng_threshold, ceo):
                         log.debug("  tweet failed gates, skip")
                         continue
 
-                    signal = evaluate_tweet(row, ceo, db)
+                    signal = evaluate_tweet(row, ceo, db, proc=proc, stocks_cache=stocks_cache)
                     if signal is None:
                         continue
 
@@ -824,6 +897,7 @@ async def run(ceo_list: list[str], dry_run: bool, interval_override: int | None,
         log.info("DRY-RUN mode — signals will be evaluated but no orders placed")
 
     _queued_open_processed = False
+    _last_full_poll_et     = None  # tracks when we last ran the full account sweep
 
     while True:
         now_et = datetime.now(ET)
@@ -836,20 +910,41 @@ async def run(ceo_list: list[str], dry_run: bool, interval_override: int | None,
         elif status != "open":
             _queued_open_processed = False
 
-        # Poll — DB-only skips Twitter entirely
-        if db_only:
-            poll_from_db(ceo_list, dry_run)
+        # Two-tier polling during market hours:
+        #   Fast lane  (every 3 min)  — HIGH_PRIORITY_HANDLES only
+        #   Full sweep (every 20 min) — all accounts
+        # Outside market hours we always do a full sweep at the slower cadence.
+        if status == "open" and not interval_override:
+            full_due = (
+                _last_full_poll_et is None
+                or (now_et - _last_full_poll_et).total_seconds() >= POLL_MARKET_HOURS_S
+            )
+            if full_due:
+                poll_list = ceo_list
+                _last_full_poll_et = now_et
+                log.info("Full sweep (%d accounts)", len(poll_list))
+            else:
+                poll_list = [c for c in ceo_list if c in HIGH_PRIORITY_HANDLES]
+                if poll_list:
+                    log.info("Fast-lane poll (%d HP accounts: %s)",
+                             len(poll_list), ", ".join(poll_list))
         else:
-            await poll_once(ceo_list, dry_run)
+            poll_list = ceo_list
+
+        if poll_list:
+            if db_only:
+                poll_from_db(poll_list, dry_run)
+            else:
+                await poll_once(poll_list, dry_run)
 
         if once:
             break
 
-        # Dynamic sleep
+        # Sleep duration
         if interval_override:
             sleep_s = interval_override
         elif status == "open":
-            sleep_s = POLL_MARKET_HOURS_S
+            sleep_s = POLL_HIGH_PRIORITY_S   # wake every 3 min; full sweep governed by _last_full_poll_et
         elif status in ("pre", "post"):
             sleep_s = POLL_EXTENDED_S
         else:

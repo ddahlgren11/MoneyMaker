@@ -2,22 +2,7 @@ import os
 import asyncio
 import pandas as pd
 from datetime import datetime, timezone, timedelta
-from tweety import Twitter
-import tweety.transaction
-
-# Runtime patch to fix tweety-ns throwing "Couldn't get animation key indices" error
-original_get_indices = tweety.transaction.TransactionGenerator.get_indices
-
-def patched_get_indices(self, home_page_html=None):
-    try:
-        return original_get_indices(self, home_page_html)
-    except Exception as e:
-        if "Couldn't get animation key indices" in str(e):
-            return 0, [1, 2, 3, 4, 5]
-        raise
-
-tweety.transaction.TransactionGenerator.get_indices = patched_get_indices
-
+from twikit import Client as TwikitClient
 from classifier import get_sentiment_score, get_finbert_scores_batch
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
@@ -26,12 +11,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+COOKIES_PATH = os.path.join(os.path.dirname(__file__), "twitter_cookies.json")
+
 class DataProcessor:
     def __init__(self):
-        self.twitter_client = Twitter("session")
+        self.twitter_client = TwikitClient("en-US")
+        if os.path.exists(COOKIES_PATH):
+            self.twitter_client.load_cookies(COOKIES_PATH)
+        else:
+            print(f"WARNING: Twitter cookies not found at {COOKIES_PATH}. "
+                  "Tweet fetching will fail. See README for cookie setup.")
+        # Market-data client works with either live or paper keys (free IEX feed).
+        # Prefer live data keys (set in the retrain workflow); fall back to paper
+        # keys (set in the watcher workflow) so both environments work.
         self.stock_client = StockHistoricalDataClient(
-            os.getenv("ALPACA_API_KEY"),
-            os.getenv("ALPACA_SECRET_KEY")
+            os.getenv("ALPACA_API_KEY") or os.getenv("ALPACA_PAPER_API_KEY"),
+            os.getenv("ALPACA_SECRET_KEY") or os.getenv("ALPACA_PAPER_SECRET_KEY"),
         )
 
     @staticmethod
@@ -44,30 +39,42 @@ class DataProcessor:
 
     async def get_tweets(self, username, pages=50):
         all_tweets = []
-        user_tweets = await self.twitter_client.get_tweets(username, pages=pages)
-        for tweet in user_tweets:
-            # Skip retweets — they reflect someone else's words, not the CEO's
-            if tweet.is_retweet:
-                continue
+        user = await self.twitter_client.get_user_by_screen_name(username)
+        result = await self.twitter_client.get_user_tweets(user.id, tweet_type="Tweets", count=20)
 
-            created = tweet.created_on
-            tweet_hour = created.hour if hasattr(created, 'hour') else 0
-            tweet_minute = created.minute if hasattr(created, 'minute') else 0
-            # NYSE opens 9:30 ET = 14:30 UTC, closes 16:00 ET = 21:00 UTC
-            is_premarket = tweet_hour < 14 or (tweet_hour == 14 and tweet_minute < 30)
+        for page_num in range(pages):
+            for tweet in result:
+                # Skip retweets — they reflect someone else's words, not the CEO's
+                if tweet.retweeted_tweet is not None:
+                    continue
 
-            all_tweets.append({
-                'ceo': username,
-                'text': tweet.text,
-                'sentiment': get_sentiment_score(tweet.text),
-                'date': created,
-                'likes': self._safe_int(tweet.likes),
-                'retweet_count': self._safe_int(tweet.retweet_counts),
-                'view_count': self._safe_int(tweet.views),
-                'reply_count': self._safe_int(tweet.reply_counts),
-                'tweet_hour': tweet_hour,
-                'is_premarket': is_premarket,
-            })
+                created = tweet.created_at_datetime
+                if created and created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                tweet_hour = created.hour if created else 0
+                tweet_minute = created.minute if created else 0
+                # NYSE opens 9:30 ET = 14:30 UTC, closes 16:00 ET = 21:00 UTC
+                is_premarket = tweet_hour < 14 or (tweet_hour == 14 and tweet_minute < 30)
+
+                all_tweets.append({
+                    'ceo': username,
+                    'text': tweet.full_text or tweet.text,
+                    'sentiment': get_sentiment_score(tweet.full_text or tweet.text),
+                    'date': created,
+                    'likes': self._safe_int(tweet.favorite_count),
+                    'retweet_count': self._safe_int(tweet.retweet_count),
+                    'view_count': self._safe_int(tweet.view_count),
+                    'reply_count': self._safe_int(tweet.reply_count),
+                    'tweet_hour': tweet_hour,
+                    'is_premarket': is_premarket,
+                })
+
+            if page_num < pages - 1:
+                try:
+                    result = await result.next()
+                except Exception:
+                    break  # no more pages
+
         df = pd.DataFrame(all_tweets)
         if not df.empty:
             df['finbert_score'] = get_finbert_scores_batch(df['text'].tolist())
