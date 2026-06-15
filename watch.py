@@ -86,6 +86,12 @@ CONF_SIZING_CEILING = 90.0   # confidence at/above which the confidence factor m
 MAX_OPEN_POSITIONS = int(os.getenv("MAX_OPEN_POSITIONS", "15"))
 MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS", "1500"))  # halt new entries past this loss
 
+# ── Congressional trades (ingested by congress_ingest.py into congress_trades) ──
+# Only act on disclosures filed within this many days, so the first poll doesn't
+# trade the entire recent backlog. The signal is the disclosure becoming public.
+CONGRESS_RECENCY_DAYS = int(os.getenv("CONGRESS_RECENCY_DAYS", "4"))
+CONGRESS_CONFIDENCE   = 80.0
+
 ET = ZoneInfo("America/New_York")
 
 # ---------------------------------------------------------------------------
@@ -152,11 +158,32 @@ CREATE TABLE IF NOT EXISTS managed_positions (
 """
 
 
+_CONGRESS_TRADES_DDL = """
+CREATE TABLE IF NOT EXISTS congress_trades (
+    id              SERIAL PRIMARY KEY,
+    dedup_key       TEXT UNIQUE,
+    chamber         TEXT,
+    member          TEXT,
+    ticker          TEXT,
+    asset_type      TEXT,
+    txn_type        TEXT,
+    direction       TEXT,
+    txn_date        TEXT,
+    disclosure_date TEXT,
+    amount          TEXT,
+    owner           TEXT,
+    ingested_at     TIMESTAMPTZ DEFAULT NOW(),
+    processed       BOOLEAN DEFAULT FALSE
+);
+"""
+
+
 def init_db():
     with engine.connect() as conn:
         conn.execute(text(_WATCHER_STATE_DDL))
         conn.execute(text(_SIGNAL_QUEUE_DDL))
         conn.execute(text(_MANAGED_POSITIONS_DDL))
+        conn.execute(text(_CONGRESS_TRADES_DDL))
         conn.commit()
 
 
@@ -1005,6 +1032,76 @@ def poll_from_db(ceo_list: list[str], dry_run: bool):
 
 
 # ---------------------------------------------------------------------------
+# Congressional trades — trade newly disclosed filings from congress_trades
+# (populated by congress_ingest.py). Structured data: ticker + direction are
+# explicit, so this bypasses the registry/ML entirely, like the tweet fast-path.
+# ---------------------------------------------------------------------------
+
+def poll_congress_trades(dry_run: bool):
+    now_et = datetime.now(ET)
+    status = market_status(now_et)
+    cutoff = (now_et.date() - timedelta(days=CONGRESS_RECENCY_DAYS)).isoformat()
+
+    db = Session()
+    try:
+        rows = db.execute(
+            text("""
+                SELECT id, chamber, member, ticker, direction, txn_type,
+                       disclosure_date, amount
+                FROM congress_trades
+                WHERE processed = FALSE AND disclosure_date >= :cutoff
+                ORDER BY disclosure_date ASC
+            """),
+            {"cutoff": cutoff},
+        ).fetchall()
+
+        # Retire disclosures too old to act on so they don't linger unprocessed.
+        db.execute(
+            text("""
+                UPDATE congress_trades SET processed = TRUE
+                WHERE processed = FALSE AND disclosure_date < :cutoff
+            """),
+            {"cutoff": cutoff},
+        )
+
+        if not rows:
+            db.commit()
+            return
+
+        log.info("Congress: %d newly disclosed trade(s) to act on", len(rows))
+        for r in rows:
+            sig = {
+                "ceo":        f"congress:{r.member}"[:64],
+                "tweet_text": f"{r.member} {r.txn_type} {r.ticker} ({r.amount}) disclosed {r.disclosure_date}",
+                "tweet_date": r.disclosure_date,
+                "topic":      "congressional_trade",
+                "ticker":     r.ticker,
+                "tightness":  1.0,
+                "direction":  r.direction,
+                "confidence": CONGRESS_CONFIDENCE,
+                "sentiment":  0.0,
+                "finbert":    None,
+            }
+            if status == "open":
+                log.info("  CONGRESS %s → %s %s [MARKET OPEN — trading]",
+                         r.member, r.direction, r.ticker)
+                _execute_signal(sig, db, dry_run)
+            else:
+                log.info("  CONGRESS %s → %s %s [market %s — queuing]",
+                         r.member, r.direction, r.ticker, status)
+                enqueue_signal(db, sig)
+            db.execute(text("UPDATE congress_trades SET processed = TRUE WHERE id = :id"),
+                       {"id": r.id})
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.error("Congress poll error: %s", e)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # One polling cycle (Twitter mode)
 # ---------------------------------------------------------------------------
 
@@ -1171,6 +1268,9 @@ async def run(ceo_list: list[str], dry_run: bool, interval_override: int | None,
                 poll_from_db(poll_list, dry_run)
             else:
                 await poll_once(poll_list, dry_run)
+
+        # Trade newly disclosed congressional filings (from congress_ingest.py)
+        poll_congress_trades(dry_run)
 
         # Close any positions that have reached their next-day exit horizon
         close_due_positions(dry_run)

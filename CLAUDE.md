@@ -39,6 +39,7 @@ PostgreSQL.
 - `classifier.py` — VADER + FinBERT sentiment, tone/type helpers, the `get_tweet_topic()` bucket classifier, and `parse_congressional_trade()` (extracts ticker + buy/sell direction from disclosure posts)
 - `model/predict.py` — builds the 22-feature vector and runs the trained model (`model/trained_model.pkl`); see `22Features.md`
 - `run_pipeline.py` — daily ingestion: fetch tweets+stocks+news for every target, write `merged_data`
+- `congress_ingest.py` — pulls latest House+Senate STOCK Act disclosures from Financial Modeling Prep (free tier, `FMP_API_KEY`) into the `congress_trades` table. No Twitter/PDF needed — structured ticker/direction/date/amount. 2 API calls per run
 - `watch.py` — intraday watcher: polls accounts, evaluates signals, places paper trades. Two-tier polling (fast lane for `HIGH_PRIORITY_HANDLES`, full sweep otherwise). `--db-only` mode (GitHub Actions) reads `merged_data` instead of fetching Twitter
 - `discover.py` — candidate-discovery pipeline; tests `candidates.csv` accounts for tweet→price links and promotes them to the registry (local only — needs cookies)
 - `targets.py` — single source of truth for handle→ticker mappings (`CEO_TARGETS`, `HANDLE_TO_TICKER`)
@@ -53,8 +54,10 @@ PostgreSQL.
 
 **Position sizing & risk caps:** trade size is conviction-scaled by `position_notional()` (blends model confidence and tightness onto [`MIN_NOTIONAL`, `MAX_NOTIONAL`]). Before opening a new position, `risk_gate()` enforces `MAX_OPEN_POSITIONS` and a `MAX_DAILY_LOSS` kill switch (via Alpaca equity vs. prior close). All sizing/risk limits are env-overridable.
 
-**Special account types:**
-- congressional-trade aggregators (`unusual_whales`, `capitoltrades`) and policy accounts (`realDonaldTrump`, `POTUS`, `ScottBessent`) are exempt from the sentiment gate in `passes_gates()` — their posts are factual/low-sentiment, so the signal comes from content, not tone.
+**Congressional trades (primary path):** sourced from official disclosures via `congress_ingest.py` → `congress_trades` table → `poll_congress_trades()` in the watcher, which builds `congressional_trade` signals (Purchase→Up, Sale→Down) and runs them through `_execute_signal()` so they get sizing, risk caps, the next-day exit, and idempotency. Gated by `CONGRESS_RECENCY_DAYS` so only freshly disclosed trades are acted on. This replaces the old, fragile tweet path; the `parse_congressional_trade()` tweet parser remains only as a fallback for any aggregator tweets still ingested.
+
+**Special account types (tweet path):**
+- policy accounts (`realDonaldTrump`, `POTUS`, `ScottBessent`) are exempt from the sentiment gate in `passes_gates()` — their posts are factual/low-sentiment, so the signal comes from content, not tone.
 - short-seller accounts (`HindenburgRes`, `muddywaters`, etc. — see `_SHORT_SELLER_HANDLES`) get a `short_report` fast-path: a report naming a ticker is a fixed DOWN signal, since these posts move stocks sharply on publication.
 
 **Weekend handling:** tweet dates on weekends shift to the following Monday for stock correlation.
@@ -67,6 +70,7 @@ Neon PostgreSQL (SQLAlchemy). Key tables:
 - `ceo_ticker_relationships` — registry of best (ceo, topic) → ticker with `tightness_score` (built by `relationship_analysis.py`)
 - `signal_queue` — signals found outside market hours, executed at next open (`watch.py`)
 - `managed_positions` — open positions with their scheduled next-day exit time (`watch.py`)
+- `congress_trades` — structured House/Senate disclosures from `congress_ingest.py`; the watcher trades unprocessed rows
 - `paper_trades` — log of every placed/skipped/errored/exit trade
 - `watcher_state` — per-CEO last-seen tweet watermark and counters
 - `tweets` / `stocks` — legacy tables used by the original FastAPI/Streamlit flow
