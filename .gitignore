@@ -1,4 +1,5 @@
 .env
+.env.bak
 __pycache__/
 test.db
 session.tw_session

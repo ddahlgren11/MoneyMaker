@@ -171,6 +171,35 @@ python3 run_pipeline.py --pages 50  # historical backfill
 python3 -m pytest tests/ -v
 ```
 
+### Twitter cookie setup
+
+Tweet fetching uses [twikit](https://github.com/d60/twikit), which authenticates
+with browser cookies instead of a paid X API key. Without valid cookies the
+pipeline runs but ingests **no new tweets** (it falls back to whatever is already
+in `merged_data`).
+
+1. **Use a dedicated burner X account** — the `auth_token` cookie is full account
+   access (no password/2FA gate), and automated access can get an account
+   rate-limited or suspended. Don't use your personal account.
+2. Log into x.com in a browser, open DevTools → Application/Storage → Cookies →
+   `https://x.com`, and copy the **`auth_token`** and **`ct0`** values.
+3. Generate and validate the cookie file:
+   ```bash
+   python3 test_twitter_cookies.py <auth_token> <ct0>   # writes twitter_cookies.json
+   ```
+4. For GitHub Actions, paste the contents of `twitter_cookies.json` into a repo
+   secret named **`TWITTER_COOKIES`** (the daily pipeline writes it back to a file).
+
+**Cookies expire** (on logout or X's rotation) — when fetching suddenly returns
+nothing, regenerate them. `processor.py` now logs a clear error and
+`run_pipeline.py` exits non-zero in that case, so the failure is visible instead
+of silent.
+
+> **Datacenter-IP note:** cookies generated on your home IP and used from
+> GitHub Actions / Render may occasionally be flagged. If that happens, run
+> ingestion locally (cron/launchd, where the IP matches the browser session) and
+> keep the cloud watcher in `--db-only` mode reading `merged_data`.
+
 ---
 
 ## Tests

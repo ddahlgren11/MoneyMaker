@@ -1,4 +1,6 @@
 import os
+import json
+import logging
 import asyncio
 import pandas as pd
 from datetime import datetime, timezone, timedelta
@@ -11,16 +13,54 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+log = logging.getLogger("processor")
+
 COOKIES_PATH = os.path.join(os.path.dirname(__file__), "twitter_cookies.json")
+
+
+class TwitterAuthError(RuntimeError):
+    """Raised when Twitter cookies are missing, malformed, or expired."""
+
+
+def _load_twitter_cookies(client) -> bool:
+    """
+    Load and sanity-check twitter_cookies.json. Returns True only if usable
+    cookies were loaded. Every failure path logs a clear, actionable message —
+    a silent failure here is what froze tweet ingestion for months.
+    """
+    if not os.path.exists(COOKIES_PATH):
+        log.warning(
+            "Twitter cookies not found at %s — tweet fetching is DISABLED. "
+            "Generate them with `python3 test_twitter_cookies.py <auth_token> <ct0>` "
+            "(see README: Twitter cookie setup).", COOKIES_PATH,
+        )
+        return False
+    try:
+        with open(COOKIES_PATH) as f:
+            cookies = json.load(f)
+    except Exception as e:
+        log.error("Twitter cookies at %s are not valid JSON (%s) — regenerate them.",
+                  COOKIES_PATH, e)
+        return False
+    missing = [k for k in ("auth_token", "ct0") if not cookies.get(k)]
+    if missing:
+        log.error("Twitter cookies at %s missing required keys %s — regenerate them.",
+                  COOKIES_PATH, missing)
+        return False
+    try:
+        client.load_cookies(COOKIES_PATH)
+    except Exception as e:
+        log.error("twikit failed to load cookies from %s (%s) — regenerate them.",
+                  COOKIES_PATH, e)
+        return False
+    log.info("Twitter cookies loaded from %s", COOKIES_PATH)
+    return True
+
 
 class DataProcessor:
     def __init__(self):
         self.twitter_client = TwikitClient("en-US")
-        if os.path.exists(COOKIES_PATH):
-            self.twitter_client.load_cookies(COOKIES_PATH)
-        else:
-            print(f"WARNING: Twitter cookies not found at {COOKIES_PATH}. "
-                  "Tweet fetching will fail. See README for cookie setup.")
+        self.cookies_loaded = _load_twitter_cookies(self.twitter_client)
         # Market-data client works with either live or paper keys (free IEX feed).
         # Prefer live data keys (set in the retrain workflow); fall back to paper
         # keys (set in the watcher workflow) so both environments work.
@@ -38,9 +78,24 @@ class DataProcessor:
             return 0
 
     async def get_tweets(self, username, pages=50):
+        if not self.cookies_loaded:
+            raise TwitterAuthError(
+                "Twitter cookies missing or invalid — cannot fetch tweets. "
+                "Regenerate twitter_cookies.json (see README: Twitter cookie setup)."
+            )
         all_tweets = []
-        user = await self.twitter_client.get_user_by_screen_name(username)
-        result = await self.twitter_client.get_user_tweets(user.id, tweet_type="Tweets", count=20)
+        try:
+            user = await self.twitter_client.get_user_by_screen_name(username)
+            result = await self.twitter_client.get_user_tweets(user.id, tweet_type="Tweets", count=20)
+        except Exception as e:
+            msg = str(e).lower()
+            if any(s in msg for s in ("401", "unauthorized", "forbidden",
+                                      "could not authenticate", "logged out", "denied")):
+                raise TwitterAuthError(
+                    f"Twitter auth rejected while fetching @{username} ({e}). "
+                    "Cookies are likely expired — regenerate twitter_cookies.json."
+                ) from e
+            raise
 
         for page_num in range(pages):
             for tweet in result:

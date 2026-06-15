@@ -260,6 +260,18 @@ async def run():
         for s in skipped:
             print(f"  skipped {s['username']}: {s['reason']}")
 
+        # Fail loudly if nothing came in and every account errored — this is the
+        # signature of broken Twitter auth (expired/missing cookies), which
+        # otherwise silently freezes ingestion. Exit non-zero so CI goes red.
+        if total_records == 0 and skipped:
+            print(
+                "\nERROR: 0 records ingested and all fetches failed — Twitter auth is "
+                "likely broken. Regenerate twitter_cookies.json / the TWITTER_COOKIES "
+                "secret (see README: Twitter cookie setup).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     except Exception as exc:
         db.rollback()
         print(f"\nFATAL: {exc}", file=sys.stderr)
