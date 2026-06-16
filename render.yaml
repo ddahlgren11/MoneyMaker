@@ -35,16 +35,19 @@ services:
       - key: ALPHA_VANTAGE_API_KEY
         sync: false
 
-  # Always-on tweet watcher — polls every 20 min during market hours,
-  # 60 min pre/post market, 4 hours overnight. Queues signals found outside
-  # market hours and executes them at next open.
-  # Requires at least the Starter plan on Render.
+  # Always-on watcher — runs continuously so the next-day exit window and
+  # intraday signals are caught reliably (GitHub Actions cron drops most ticks).
+  # Runs in --db-only mode: it trades congressional disclosures (congress_trades),
+  # processes the signal queue, and closes positions at their exit horizon without
+  # needing Twitter cookies. Drop --db-only once twitter_cookies.json is supplied
+  # to also fetch live tweets.
+  # Requires at least the Starter plan on Render (free workers spin down).
   - type: worker
     name: tweet-watcher
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: python3 watch.py
+    startCommand: python3 watch.py --db-only
     envVars:
       - key: DATABASE_URL
         sync: false

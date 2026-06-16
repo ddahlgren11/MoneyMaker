@@ -123,11 +123,13 @@ def show_portfolio():
     print(f"  Portfolio Value : ${float(acct.portfolio_value):>12,.2f}")
     print(f"  Cash            : ${float(acct.cash):>12,.2f}")
     print(f"  Equity          : ${float(acct.equity):>12,.2f}")
-    print(f"  Unrealized P&L  : ${float(acct.unrealized_pl):>+12,.2f}")
+    print(f"  Today's P&L     : ${float(acct.equity) - float(acct.last_equity):>+12,.2f}")
     print(f"  Buying Power    : ${float(acct.buying_power):>12,.2f}")
 
     positions = tc.get_all_positions()
     if positions:
+        total_unreal = sum(float(p.unrealized_pl) for p in positions)
+        print(f"  Open P&L        : ${total_unreal:>+12,.2f}  across {len(positions)} positions")
         print("\n── Open Positions ─────────────────────────────")
         print(f"  {'Symbol':<8} {'Side':<6} {'Qty':>6}  {'Entry':>8}  {'Now':>8}  {'P&L':>10}  {'P&L%':>7}")
         print("  " + "─" * 60)
