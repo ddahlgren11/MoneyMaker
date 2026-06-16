@@ -1,8 +1,8 @@
 # MoneyMaker
 
-**Do CEO tweets move stock prices?**
+**Turn public market signals into automated paper trades.**
 
-MoneyMaker answers that question with real data. It collects tweets from 24 high-profile CEOs, scores each one for sentiment using two NLP models (VADER + FinBERT), pairs every tweet with that day's stock data and broader market context, and runs a machine learning model that predicts whether the stock will close higher or lower the following trading day.
+MoneyMaker started by asking whether CEO tweets move stock prices — it collects tweets from high-profile CEOs, scores them with two NLP models (VADER + FinBERT), pairs each with stock and market context, and trains a model to predict next-day direction. It has since grown into a multi-source trading-signal pipeline: alongside CEO sentiment it ingests **congressional trade disclosures** (official House/Senate filings), **short-seller reports**, and **policy/macro accounts**, then a continuous **watcher** evaluates each signal and places Alpaca **paper trades** with conviction-based sizing, portfolio risk caps, and scheduled next-day exits.
 
 **[Live demo →](https://moneymaker-ddahlgren.streamlit.app)** &nbsp;|&nbsp; Built by [Dillon Dahlgren](https://github.com/ddahlgren11)
 
@@ -16,27 +16,35 @@ MoneyMaker answers that question with real data. It collects tweets from 24 high
 | Backend API | FastAPI, SQLAlchemy (ORM), Pydantic v2, Uvicorn |
 | Frontend | Streamlit, Plotly |
 | ML / NLP | scikit-learn, VADER, FinBERT (HuggingFace `ProsusAI/finbert`), pandas, numpy |
+| Trading / execution | Alpaca paper trading, conviction-based sizing, portfolio risk caps, scheduled exits |
 | Database | Neon (serverless PostgreSQL), psycopg2 |
-| Data sources | Twitter/X (twikit, cookie auth), Alpaca Markets, Alpha Vantage, Finnhub, yfinance |
-| CI/CD | GitHub Actions (scheduled daily retraining) |
-| Hosting | Streamlit Community Cloud |
+| Data sources | Twitter/X (twikit, cookie auth), Financial Modeling Prep (congressional disclosures), Alpaca Markets, Alpha Vantage, Finnhub, yfinance |
+| CI/CD | GitHub Actions — daily retrain, intraday market watcher, congressional ingest |
+| Hosting | Streamlit Community Cloud; watcher worker on Render |
 
 ---
 
 ## Architecture
 
-The project has two operating modes:
+The project has three operating modes:
 
-**Full local pipeline** — three-tier, for data ingestion and model training:
+**Data + model pipeline** — ingestion and training:
 ```
-Twitter/X · Alpaca · Alpha Vantage · Finnhub · yfinance
+Twitter/X · FMP (congress) · Alpaca · Alpha Vantage · Finnhub · yfinance
         ↓
-  processor.py  →  FastAPI (main.py)  →  Neon PostgreSQL
-                                              ↑ HTTP
-                                    Streamlit UI (app.py)
+  run_pipeline.py / congress_ingest.py  →  Neon PostgreSQL  →  model/baseline.py (retrain)
 ```
 
-**Hosted demo** — Streamlit connects directly to the database, stock data via yfinance (no FastAPI needed for read-only display):
+**Live trading loop** — `watch.py` runs continuously (Render worker) or per-cycle (GitHub Actions, `--db-only`):
+```
+new signal (tweet topic | congressional disclosure | short-seller report)
+        ↓
+classify → registry/ML or fast-path → confidence gate → conviction sizing → risk caps
+        ↓
+Alpaca paper order  →  managed_positions (scheduled next-day exit)  →  paper_trades log
+```
+
+**Dashboard** — Streamlit connects directly to the database, stock data via yfinance:
 ```
 Neon PostgreSQL  ←→  Streamlit (app.py)  ←→  yfinance
 ```
@@ -63,6 +71,33 @@ Neon PostgreSQL  ←→  Streamlit (app.py)  ←→  yfinance
 
 ---
 
+## Trading Signals & Execution
+
+The watcher (`watch.py`) turns signals into Alpaca paper trades. It runs continuously as a Render worker (live Twitter mode) and per-cycle in GitHub Actions (`--db-only`, reads `merged_data`).
+
+**Signal sources**
+
+| Source | Path | Direction logic |
+|--------|------|-----------------|
+| CEO sentiment tweets | topic classify → relationship registry → ML model → ≥55% confidence gate | model prediction |
+| Congressional trades | `congress_ingest.py` (FMP) → `congress_trades` → fast-path | Purchase → Up, Sale → Down |
+| Short-seller reports | `_SHORT_SELLER_HANDLES` tweet → fast-path | report → Down |
+| Policy / macro accounts | Trump / POTUS / Treasury → `policy` topic → registry/ML | sector-ETF mapping |
+
+Congressional and policy posts are exempt from the sentiment gate (they're factual, not opinionated); congressional and short-seller signals skip the ML model entirely since the ticker and direction are explicit.
+
+**Execution controls**
+
+- **Conviction-based sizing** — trade notional scales between `MIN_NOTIONAL` and `MAX_NOTIONAL` by a blend of model confidence and relationship tightness.
+- **Portfolio risk caps** — `MAX_OPEN_POSITIONS` limit and a `MAX_DAILY_LOSS` kill switch (Alpaca equity vs. prior close) block new entries.
+- **Scheduled exits** — every entry is recorded in `managed_positions` and closed at the next trading day's close (the model's prediction horizon), not left open until a reversing signal.
+- **Idempotency** — a signal is never traded twice (guards retries and the Render-worker + GitHub-Actions overlap).
+- **Market-hours aware** — signals found outside market hours are queued in `signal_queue` and executed at the next open.
+
+The relationship registry (`ceo_ticker_relationships`, built by `relationship_analysis.py`) scores each (account, topic, ticker) link by directional hit rate, statistical significance, and volatility amplification into a `tightness_score`, which gates and sizes the tweet-based trades.
+
+---
+
 ## ML Model — Feature Set
 
 | Category | Features |
@@ -81,7 +116,7 @@ Engagement counts are log-transformed (`log1p`) to compress the heavy right skew
 
 ## Database Schema
 
-Four tables, auto-created by SQLAlchemy on startup.
+Tables are auto-created by SQLAlchemy on startup and by the watcher/ingester on first run.
 
 **`merged_data`** — the main analysis table used for training and display
 
@@ -109,7 +144,18 @@ Four tables, auto-created by SQLAlchemy on startup.
 | `news_sentiment_score` | Float | Avg headline sentiment for the ticker that day |
 | `days_to_earnings` | Integer | Calendar days to nearest earnings date |
 
-Additional tables: `tweets` (raw), `stocks` (raw OHLCV), `news_sentiment_cache` (API cache keyed by ticker + date).
+**Operational tables** (auto-created by the watcher / ingester):
+
+| Table | Purpose |
+|-------|---------|
+| `congress_trades` | Structured House/Senate disclosures from `congress_ingest.py` (ticker, direction, dates, amount) |
+| `ceo_ticker_relationships` | Per-(account, topic, ticker) registry with `tightness_score` |
+| `signal_queue` | Signals found outside market hours, executed at next open |
+| `managed_positions` | Open positions with their scheduled next-day exit time |
+| `paper_trades` | Log of every placed / skipped / errored / exit trade |
+| `watcher_state` | Per-account last-seen-tweet watermark and counters |
+
+Additional cache/raw tables: `tweets` (raw), `stocks` (raw OHLCV), `news_sentiment_cache` (API cache keyed by ticker + date).
 
 ---
 
@@ -146,8 +192,9 @@ ALPACA_API_KEY=your_alpaca_api_key                  # market data (live keys)
 ALPACA_SECRET_KEY=your_alpaca_secret_key
 ALPACA_PAPER_API_KEY=your_alpaca_paper_api_key      # paper trading (watch.py / trade.py)
 ALPACA_PAPER_SECRET_KEY=your_alpaca_paper_secret_key
-FINNHUB_API_KEY=your_finnhub_api_key          # optional
-ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key  # optional
+FINNHUB_API_KEY=your_finnhub_api_key          # news sentiment
+ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key  # fallback news sentiment (optional)
+FMP_API_KEY=your_fmp_api_key                  # congressional disclosures (free tier)
 
 # 2b. Generate Twitter cookies for twikit (no paid API needed).
 #     Grab auth_token and ct0 from your logged-in x.com browser cookies, then:
@@ -163,11 +210,16 @@ streamlit run app.py                # http://localhost:8501
 # 5. Train the ML model (required before the Predict tab works)
 python3 model/baseline.py
 
-# 6. Run the data pipeline manually
-python3 run_pipeline.py             # daily incremental
+# 6. Run the data pipelines manually
+python3 run_pipeline.py             # tweets + stocks + news (daily incremental)
 python3 run_pipeline.py --pages 50  # historical backfill
+python3 congress_ingest.py          # latest House + Senate disclosures (FMP)
 
-# 7. Run all tests
+# 7. Run the trading watcher
+python3 watch.py --once --db-only --dry-run   # one cycle, no orders (safe smoke test)
+python3 watch.py --db-only                     # continuous, places paper trades
+
+# 8. Run all tests
 python3 -m pytest tests/ -v
 ```
 
@@ -219,7 +271,11 @@ of silent.
 
 ---
 
-## CEO Coverage (24)
+## Signal Coverage
+
+Beyond the CEO roster below, the watcher also acts on **congressional trades** (all disclosing House & Senate members, via FMP), **short-seller reports** (Hindenburg, Muddy Waters, Citron, and peers), and **policy/macro accounts** (President, POTUS, Treasury) mapped to sector ETFs.
+
+### Tracked CEOs (24)
 
 | Handle | Name | Ticker | Handle | Name | Ticker |
 |--------|------|--------|--------|------|--------|
