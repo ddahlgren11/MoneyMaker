@@ -17,6 +17,11 @@ log = logging.getLogger("processor")
 
 COOKIES_PATH = os.path.join(os.path.dirname(__file__), "twitter_cookies.json")
 
+# Tweet backend: "syndication" (free, no-auth public endpoint — the default now
+# that cookies expire and freeze ingestion) or "twikit" (cookie auth, supports
+# deeper pagination/backfill). Override with TWEET_SOURCE in the environment.
+TWEET_SOURCE = os.getenv("TWEET_SOURCE", "syndication").lower()
+
 
 class TwitterAuthError(RuntimeError):
     """Raised when Twitter cookies are missing, malformed, or expired."""
@@ -77,11 +82,53 @@ class DataProcessor:
         except (ValueError, TypeError):
             return 0
 
+    @staticmethod
+    def _build_row(username, text, created, likes, retweets, views, replies):
+        """Assemble one merged_data tweet row (shared by both backends)."""
+        if created and created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        tweet_hour = created.hour if created else 0
+        tweet_minute = created.minute if created else 0
+        # NYSE opens 9:30 ET = 14:30 UTC, closes 16:00 ET = 21:00 UTC
+        is_premarket = tweet_hour < 14 or (tweet_hour == 14 and tweet_minute < 30)
+        return {
+            'ceo': username,
+            'text': text,
+            'sentiment': get_sentiment_score(text),
+            'date': created,
+            'likes': DataProcessor._safe_int(likes),
+            'retweet_count': DataProcessor._safe_int(retweets),
+            'view_count': DataProcessor._safe_int(views),
+            'reply_count': DataProcessor._safe_int(replies),
+            'tweet_hour': tweet_hour,
+            'is_premarket': is_premarket,
+        }
+
+    def _get_tweets_syndication(self, username, limit=100):
+        """Free, no-auth backend: X's public syndication timeline endpoint."""
+        from tweet_sources import fetch_syndication
+        rows = [
+            self._build_row(username, t['text'], t['created'], t['likes'],
+                            t['retweet_count'], t['view_count'], t['reply_count'])
+            for t in fetch_syndication(username, limit=limit)
+            if (t['text'] or '').strip()
+        ]
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df['finbert_score'] = get_finbert_scores_batch(df['text'].tolist())
+        return df
+
     async def get_tweets(self, username, pages=50):
+        # Free, no-auth backend (default). Cookies expire and freeze ingestion,
+        # so syndication is preferred unless TWEET_SOURCE=twikit is set.
+        if TWEET_SOURCE == "syndication":
+            return self._get_tweets_syndication(username, limit=20 * max(pages, 1))
+
         if not self.cookies_loaded:
             raise TwitterAuthError(
                 "Twitter cookies missing or invalid — cannot fetch tweets. "
-                "Regenerate twitter_cookies.json (see README: Twitter cookie setup)."
+                "Regenerate twitter_cookies.json (see README: Twitter cookie setup), "
+                "or use the default free backend (unset TWEET_SOURCE / set it to 'syndication')."
             )
         all_tweets = []
         try:
@@ -102,27 +149,11 @@ class DataProcessor:
                 # Skip retweets — they reflect someone else's words, not the CEO's
                 if tweet.retweeted_tweet is not None:
                     continue
-
-                created = tweet.created_at_datetime
-                if created and created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
-                tweet_hour = created.hour if created else 0
-                tweet_minute = created.minute if created else 0
-                # NYSE opens 9:30 ET = 14:30 UTC, closes 16:00 ET = 21:00 UTC
-                is_premarket = tweet_hour < 14 or (tweet_hour == 14 and tweet_minute < 30)
-
-                all_tweets.append({
-                    'ceo': username,
-                    'text': tweet.full_text or tweet.text,
-                    'sentiment': get_sentiment_score(tweet.full_text or tweet.text),
-                    'date': created,
-                    'likes': self._safe_int(tweet.favorite_count),
-                    'retweet_count': self._safe_int(tweet.retweet_count),
-                    'view_count': self._safe_int(tweet.view_count),
-                    'reply_count': self._safe_int(tweet.reply_count),
-                    'tweet_hour': tweet_hour,
-                    'is_premarket': is_premarket,
-                })
+                all_tweets.append(self._build_row(
+                    username, tweet.full_text or tweet.text, tweet.created_at_datetime,
+                    tweet.favorite_count, tweet.retweet_count,
+                    tweet.view_count, tweet.reply_count,
+                ))
 
             if page_num < pages - 1:
                 try:

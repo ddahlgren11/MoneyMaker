@@ -7,6 +7,7 @@ pydantic==2.12.5
 python-dotenv==1.2.2
 pandas==2.3.3
 twikit==2.3.3
+praw==7.8.1
 vaderSentiment==3.3.2
 alpaca-py
 streamlit==1.55.0

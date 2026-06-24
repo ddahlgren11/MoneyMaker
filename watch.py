@@ -92,6 +92,25 @@ MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS", "1500"))  # halt new entr
 CONGRESS_RECENCY_DAYS = int(os.getenv("CONGRESS_RECENCY_DAYS", "4"))
 CONGRESS_CONFIDENCE   = 80.0
 
+# ── SEC Form 4 insider trades (ingested by insider_ingest.py into insider_trades) ─
+# Structured corporate-insider analogue of congressional trades: open-market buy
+# (code P) → Up, sale (code S) → Down. Same fast-path treatment (no registry/ML).
+# Insider BUYS are the well-documented predictive signal; SELLS are noisy
+# (diversification/tax/10b5-1), so they're OFF by default — run event_study.py to
+# decide whether to enable them via INSIDER_BUYS_ONLY=false.
+INSIDER_RECENCY_DAYS  = int(os.getenv("INSIDER_RECENCY_DAYS", "3"))
+INSIDER_CONFIDENCE    = float(os.getenv("INSIDER_CONFIDENCE", "70.0"))
+INSIDER_BUYS_ONLY     = os.getenv("INSIDER_BUYS_ONLY", "true").lower() != "false"
+INSIDER_MIN_VALUE     = float(os.getenv("INSIDER_MIN_TRADE_VALUE", "50000"))
+
+# ── Reddit spike signals (ingested by reddit_ingest.py into reddit_signals) ──────
+# EXPERIMENTAL and UNPROVEN — Reddit chatter has no inherent direction, so live
+# trading is OFF by default. Signals are still collected for event_study.py; only
+# flip REDDIT_TRADING_ENABLED=true once the study shows the spike heuristic has edge.
+REDDIT_TRADING_ENABLED = os.getenv("REDDIT_TRADING_ENABLED", "false").lower() == "true"
+REDDIT_RECENCY_DAYS    = int(os.getenv("REDDIT_RECENCY_DAYS", "2"))
+REDDIT_CONFIDENCE      = float(os.getenv("REDDIT_CONFIDENCE", "60.0"))
+
 ET = ZoneInfo("America/New_York")
 
 # ---------------------------------------------------------------------------
@@ -368,7 +387,7 @@ def passes_gates(row: pd.Series, eng_threshold: float, ceo: str | None = None) -
     # was tuned for opinionated CEO tweets and would wrongly discard them, so exempt
     # those topics — the ticker/direction comes from the post itself, not sentiment.
     topic = get_tweet_topic(text, ceo) if ceo else None
-    if topic not in ("congressional_trade", "policy", "short_report"):
+    if topic not in ("congressional_trade", "policy", "short_report", "insider_trade"):
         finbert = row.get("finbert_score")
         if finbert is not None:
             if abs(float(finbert)) < FINBERT_THRESHOLD:
@@ -1102,6 +1121,150 @@ def poll_congress_trades(dry_run: bool):
 
 
 # ---------------------------------------------------------------------------
+# SEC Form 4 insider trades — trade newly disclosed filings from insider_trades
+# (populated by insider_ingest.py). Structured corporate-insider analogue of the
+# congressional path: ticker + direction are explicit, so it bypasses registry/ML.
+# ---------------------------------------------------------------------------
+
+def poll_insider_trades(dry_run: bool):
+    now_et = datetime.now(ET)
+    status = market_status(now_et)
+    cutoff = (now_et.date() - timedelta(days=INSIDER_RECENCY_DAYS)).isoformat()
+
+    db = Session()
+    try:
+        direction_clause = "AND direction = 'Up'" if INSIDER_BUYS_ONLY else ""
+        rows = db.execute(
+            text(f"""
+                SELECT id, insider, role, ticker, direction, txn_code,
+                       shares, price, value, disclosure_date
+                FROM insider_trades
+                WHERE processed = FALSE AND disclosure_date >= :cutoff
+                  AND value >= :minval
+                  {direction_clause}
+                ORDER BY disclosure_date ASC, value DESC
+            """),
+            {"cutoff": cutoff, "minval": INSIDER_MIN_VALUE},
+        ).fetchall()
+
+        # Retire disclosures too old to act on so they don't linger unprocessed.
+        db.execute(
+            text("""
+                UPDATE insider_trades SET processed = TRUE
+                WHERE processed = FALSE AND disclosure_date < :cutoff
+            """),
+            {"cutoff": cutoff},
+        )
+
+        if not rows:
+            db.commit()
+            return
+
+        log.info("Insider: %d newly disclosed Form 4 trade(s) to act on", len(rows))
+        for r in rows:
+            sig = {
+                "ceo":        f"insider:{r.insider}"[:64],
+                "tweet_text": (f"{r.insider} ({r.role}) {r.txn_code} "
+                               f"{r.shares:.0f} {r.ticker} @ ${r.price:.2f} "
+                               f"= ${r.value:,.0f} disclosed {r.disclosure_date}"),
+                "tweet_date": r.disclosure_date,
+                "topic":      "insider_trade",
+                "ticker":     r.ticker,
+                "tightness":  1.0,
+                "direction":  r.direction,
+                "confidence": INSIDER_CONFIDENCE,
+                "sentiment":  0.0,
+                "finbert":    None,
+            }
+            if status == "open":
+                log.info("  INSIDER %s → %s %s [MARKET OPEN — trading]",
+                         r.insider, r.direction, r.ticker)
+                _execute_signal(sig, db, dry_run)
+            else:
+                log.info("  INSIDER %s → %s %s [market %s — queuing]",
+                         r.insider, r.direction, r.ticker, status)
+                enqueue_signal(db, sig)
+            db.execute(text("UPDATE insider_trades SET processed = TRUE WHERE id = :id"),
+                       {"id": r.id})
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.error("Insider poll error: %s", e)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# Reddit spike signals — EXPERIMENTAL. Trade freshly detected mention/sentiment
+# spikes from reddit_signals (populated by reddit_ingest.py). Disabled by default
+# (REDDIT_TRADING_ENABLED) until event_study.py shows the heuristic has edge.
+# ---------------------------------------------------------------------------
+
+def poll_reddit_signals(dry_run: bool):
+    if not REDDIT_TRADING_ENABLED:
+        return  # collected for the event study, but not traded yet
+
+    now_et = datetime.now(ET)
+    status = market_status(now_et)
+    cutoff = (now_et.date() - timedelta(days=REDDIT_RECENCY_DAYS)).isoformat()
+
+    db = Session()
+    try:
+        rows = db.execute(
+            text("""
+                SELECT id, ticker, direction, mention_count, z_score, avg_sentiment, date
+                FROM reddit_signals
+                WHERE processed = FALSE AND date >= :cutoff
+                ORDER BY z_score DESC NULLS LAST
+            """),
+            {"cutoff": cutoff},
+        ).fetchall()
+
+        db.execute(
+            text("UPDATE reddit_signals SET processed = TRUE "
+                 "WHERE processed = FALSE AND date < :cutoff"),
+            {"cutoff": cutoff},
+        )
+
+        if not rows:
+            db.commit()
+            return
+
+        log.info("Reddit: %d fresh spike signal(s) to act on", len(rows))
+        for r in rows:
+            sig = {
+                "ceo":        f"reddit:{r.ticker}",
+                "tweet_text": (f"Reddit spike {r.ticker} {r.direction} "
+                               f"(mentions={r.mention_count}, z={r.z_score}, "
+                               f"sent={r.avg_sentiment}) on {r.date}"),
+                "tweet_date": r.date,
+                "topic":      "reddit_spike",
+                "ticker":     r.ticker,
+                "tightness":  None,
+                "direction":  r.direction,
+                "confidence": REDDIT_CONFIDENCE,
+                "sentiment":  float(r.avg_sentiment or 0.0),
+                "finbert":    None,
+            }
+            if status == "open":
+                log.info("  REDDIT %s → %s [MARKET OPEN — trading]", r.ticker, r.direction)
+                _execute_signal(sig, db, dry_run)
+            else:
+                log.info("  REDDIT %s → %s [market %s — queuing]", r.ticker, r.direction, status)
+                enqueue_signal(db, sig)
+            db.execute(text("UPDATE reddit_signals SET processed = TRUE WHERE id = :id"),
+                       {"id": r.id})
+
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        log.error("Reddit poll error: %s", e)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # One polling cycle (Twitter mode)
 # ---------------------------------------------------------------------------
 
@@ -1271,6 +1434,12 @@ async def run(ceo_list: list[str], dry_run: bool, interval_override: int | None,
 
         # Trade newly disclosed congressional filings (from congress_ingest.py)
         poll_congress_trades(dry_run)
+
+        # Trade newly disclosed SEC Form 4 insider filings (from insider_ingest.py)
+        poll_insider_trades(dry_run)
+
+        # Trade Reddit spike signals (experimental; disabled unless REDDIT_TRADING_ENABLED)
+        poll_reddit_signals(dry_run)
 
         # Close any positions that have reached their next-day exit horizon
         close_due_positions(dry_run)

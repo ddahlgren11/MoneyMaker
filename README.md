@@ -18,7 +18,7 @@ MoneyMaker started by asking whether CEO tweets move stock prices — it collect
 | ML / NLP | scikit-learn, VADER, FinBERT (HuggingFace `ProsusAI/finbert`), pandas, numpy |
 | Trading / execution | Alpaca paper trading, conviction-based sizing, portfolio risk caps, scheduled exits |
 | Database | Neon (serverless PostgreSQL), psycopg2 |
-| Data sources | Twitter/X (twikit, cookie auth), Financial Modeling Prep (congressional disclosures), Alpaca Markets, Alpha Vantage, Finnhub, yfinance |
+| Data sources | Twitter/X (free syndication endpoint, twikit fallback), SEC EDGAR (Form 4 insiders), Financial Modeling Prep (congressional disclosures), Reddit (praw), Alpaca Markets, Alpha Vantage, Finnhub, yfinance |
 | CI/CD | GitHub Actions — daily retrain, intraday market watcher, congressional ingest |
 | Hosting | Streamlit Community Cloud; watcher worker on Render |
 
@@ -61,13 +61,13 @@ Neon PostgreSQL  ←→  Streamlit (app.py)  ←→  yfinance
 
 - **Exponential decay sample weights** (half-life 180 days) — tweets from 6 months ago carry 50% the weight of today's tweets. Keeps the model current without discarding historical signal.
 
-- **22-feature input vector** spanning sentiment (VADER + FinBERT), engagement (likes/retweets/views, log-transformed), timing (tweet hour, pre-market flag), technicals (RSI, ATR), and market context (VIX, days to earnings, prior-day news sentiment).
+- **23-feature input vector** spanning sentiment (VADER + FinBERT), engagement (likes/retweets/views, log-transformed), timing (tweet hour, pre-market flag), technicals (RSI, ATR), and market context (VIX, days to earnings, prior-day news sentiment).
 
 - **Deduplicating daily pipeline** — `run_pipeline.py` loads existing tweet timestamps from the DB before fetching and only inserts new records. History accumulates over time; a partial failure doesn't wipe data.
 
 - **Automated daily retraining** — GitHub Actions runs at 8am EST on weekdays, ingests fresh data, retrains the model, and commits the updated `.pkl` back to the repo with a date-stamped message.
 
-- **116-test suite** across 6 files — all external dependencies (Twitter, Alpaca, Alpha Vantage, Finnhub) are mocked. Tests cover sentiment scoring, API response schemas, engagement parsing edge cases, ML feature contract enforcement, and inference-time correctness.
+- **145-test suite** across 10 files — all external dependencies (Twitter/syndication, SEC EDGAR, Reddit, Alpaca, Alpha Vantage, Finnhub) are mocked. Tests cover sentiment scoring, API response schemas, engagement parsing edge cases, ML feature contract enforcement, inference-time correctness, the Form 4 parser, Reddit ticker/spike logic, and event-study return math.
 
 ---
 
@@ -81,8 +81,10 @@ The watcher (`watch.py`) turns signals into Alpaca paper trades. It runs continu
 |--------|------|-----------------|
 | CEO sentiment tweets | topic classify → relationship registry → ML model → ≥55% confidence gate | model prediction |
 | Congressional trades | `congress_ingest.py` (FMP) → `congress_trades` → fast-path | Purchase → Up, Sale → Down |
+| SEC Form 4 insider trades | `insider_ingest.py` (EDGAR) → `insider_trades` → fast-path | Buy (P) → Up, Sale (S) → Down |
 | Short-seller reports | `_SHORT_SELLER_HANDLES` tweet → fast-path | report → Down |
 | Policy / macro accounts | Trump / POTUS / Treasury → `policy` topic → registry/ML | sector-ETF mapping |
+| Reddit spikes *(experimental)* | `reddit_ingest.py` → `reddit_signals` → fast-path | mention spike + sentiment lean; **trading off by default** |
 
 Congressional and policy posts are exempt from the sentiment gate (they're factual, not opinionated); congressional and short-seller signals skip the ML model entirely since the ticker and direction are explicit.
 
@@ -148,12 +150,10 @@ Tables are auto-created by SQLAlchemy on startup and by the watcher/ingester on 
 
 | Table | Purpose |
 |-------|---------|
-| `congress_trades` | Structured House/Senate disclosures from `congress_ingest.py` (ticker, direction, dates, amount) |
-| `ceo_ticker_relationships` | Per-(account, topic, ticker) registry with `tightness_score` |
-| `signal_queue` | Signals found outside market hours, executed at next open |
-| `managed_positions` | Open positions with their scheduled next-day exit time |
 | `paper_trades` | Log of every placed / skipped / errored / exit trade |
 | `watcher_state` | Per-account last-seen-tweet watermark and counters |
+| `insider_trades` | SEC Form 4 corporate-insider filings from `insider_ingest.py` (ticker, P/S, shares, price, role) |
+| `reddit_sentiment` / `reddit_signals` | Reddit mention counts + sentiment per (date, ticker), and the spike-derived signals (experimental) from `reddit_ingest.py` |
 
 Additional cache/raw tables: `tweets` (raw), `stocks` (raw OHLCV), `news_sentiment_cache` (API cache keyed by ticker + date).
 
@@ -195,8 +195,14 @@ ALPACA_PAPER_SECRET_KEY=your_alpaca_paper_secret_key
 FINNHUB_API_KEY=your_finnhub_api_key          # news sentiment
 ALPHA_VANTAGE_API_KEY=your_alpha_vantage_key  # fallback news sentiment (optional)
 FMP_API_KEY=your_fmp_api_key                  # congressional disclosures (free tier)
+SEC_USER_AGENT="Your Name your@email.com"     # required by SEC EDGAR (Form 4 insiders)
+REDDIT_CLIENT_ID=your_reddit_app_id           # reddit_ingest.py (free 'script' app)
+REDDIT_CLIENT_SECRET=your_reddit_app_secret
+REDDIT_USER_AGENT="MoneyMaker:reddit_ingest:v1 (by u/you)"
+# TWEET_SOURCE=syndication                    # default free tweet backend; set to 'twikit' to use cookies
 
-# 2b. Generate Twitter cookies for twikit (no paid API needed).
+# 2b. (Optional) twikit cookies — only needed if TWEET_SOURCE=twikit.
+#     The default 'syndication' backend needs no cookies. To use twikit instead:
 #     Grab auth_token and ct0 from your logged-in x.com browser cookies, then:
 python3 test_twitter_cookies.py <auth_token> <ct0>   # writes twitter_cookies.json
 #     For GitHub Actions, paste the file's contents into the TWITTER_COOKIES repo secret.
@@ -214,12 +220,26 @@ python3 model/baseline.py
 python3 run_pipeline.py             # tweets + stocks + news (daily incremental)
 python3 run_pipeline.py --pages 50  # historical backfill
 python3 congress_ingest.py          # latest House + Senate disclosures (FMP)
+python3 insider_ingest.py           # latest SEC Form 4 insider trades (EDGAR)
+python3 insider_ingest.py --dry-run # parse + print, no DB writes
+python3 reddit_ingest.py            # WSB/stocks mention + sentiment spikes (needs Reddit app creds)
+
+# 6b. Validate whether a signal source actually has edge (read-only, no trades)
+python3 event_study.py --source insider     # insider trades, 1/3/5-day forward abnormal returns
+python3 event_study.py --source congress     # congressional trades
+python3 event_study.py --source reddit        # reddit spikes
 
 # 7. Run the trading watcher
 python3 watch.py --once --db-only --dry-run   # one cycle, no orders (safe smoke test)
 python3 watch.py --db-only                     # continuous, places paper trades
 
-# 8. Run all tests
+# 8. Run the one-shot morning trader (registry → ML → paper orders)
+python3 trade.py --dry-run          # preview signals, no orders placed
+python3 trade.py                    # trade all CEOs with registry entries
+python3 trade.py --portfolio        # print Alpaca account + open positions and exit
+python3 trade.py --history          # print recent trade log and exit
+
+# 9. Run all tests
 python3 -m pytest tests/ -v
 ```
 
@@ -257,7 +277,7 @@ of silent.
 ## Tests
 
 ```
-116 tests · 6 files · all external APIs mocked · no credentials needed
+145 tests · 10 files · all external APIs mocked · no credentials needed
 ```
 
 | File | What it covers |
@@ -268,6 +288,10 @@ of silent.
 | `test_processor.py` | `_safe_int()` — handles `None`, `"Unavailable"`, float strings, large ints |
 | `test_context.py` | Alpha Vantage and Finnhub parsing, fallback logic, rate-limit handling, caching |
 | `test_predict.py` | Feature contract (23 exact features), weekend date shifting, RSI flags, inference correctness |
+| `test_insider.py` | SEC Form 4 parser — P/S extraction, direction mapping, role/value, dedup keys, malformed XML |
+| `test_reddit.py` | Reddit ticker extraction (cashtags, stopwords) and mention/sentiment spike detection |
+| `test_tweet_sources.py` | Syndication `__NEXT_DATA__` parsing, retweet skipping, timestamp parsing |
+| `test_event_study.py` | Forward-return math, market-abnormal orientation, strategy-return aggregation |
 
 ---
 
@@ -275,7 +299,7 @@ of silent.
 
 Beyond the CEO roster below, the watcher also acts on **congressional trades** (all disclosing House & Senate members, via FMP), **short-seller reports** (Hindenburg, Muddy Waters, Citron, and peers), and **policy/macro accounts** (President, POTUS, Treasury) mapped to sector ETFs.
 
-### Tracked CEOs (24)
+### Tracked CEOs (26)
 
 | Handle | Name | Ticker | Handle | Name | Ticker |
 |--------|------|--------|--------|------|--------|
@@ -283,11 +307,12 @@ Beyond the CEO roster below, the watcher also acts on **congressional trades** (
 | tim_cook | Tim Cook | AAPL | jack | Jack Dorsey | SQ |
 | satyanadella | Satya Nadella | MSFT | tobi | Tobi Lütke | SHOP |
 | sundarpichai | Sundar Pichai | GOOGL | brian_armstrong | Brian Armstrong | COIN |
-| MichaelDell | Michael Dell | DELL | CathieDWood | Cathie Wood | ARKK |
-| ajassy | Andy Jassy | AMZN | mtbarra | Mary Barra | GM |
-| bchesky | Brian Chesky | ABNB | JimFarley98 | Jim Farley | F |
-| dkhos | Dara Khosrowshahi | UBER | AnthonyNoto | Anthony Noto | SOFI |
-| RobertIger | Bob Iger | DIS | reedhastings | Reed Hastings | NFLX |
-| Benioff | Marc Benioff | CRM | PGelsinger | Pat Gelsinger | INTC |
-| george_kurtz | George Kurtz | CRWD | levie | Aaron Levie | BOX |
-| eldsjal | Daniel Ek | SPOT | RJScaringe | RJ Scaringe | RIVN |
+| MichaelDell | Michael Dell | DELL | ericyuan | Eric Yuan | ZM |
+| ajassy | Andy Jassy | AMZN | CathieDWood | Cathie Wood | ARKK |
+| bchesky | Brian Chesky | ABNB | AlexKarp | Alex Karp | PLTR |
+| dkhos | Dara Khosrowshahi | UBER | mtbarra | Mary Barra | GM |
+| RobertIger | Robert Iger | DIS | JimFarley98 | Jim Farley | F |
+| Benioff | Marc Benioff | CRM | AnthonyNoto | Anthony Noto | SOFI |
+| george_kurtz | George Kurtz | CRWD | reedhastings | Reed Hastings | NFLX |
+| eldsjal | Daniel Ek | SPOT | PGelsinger | Pat Gelsinger | INTC |
+| RJScaringe | RJ Scaringe | RIVN | levie | Aaron Levie | BOX |
