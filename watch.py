@@ -836,6 +836,25 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
                 mark_signal_processed(db, sig["id"], None)
             return
 
+    # Market-regime gate (top-level, Part II). Project policy: gate LONG entries
+    # only — shorts (congress/insider sales) fire regardless of regime. Inert
+    # unless REGIME_GATE_ENABLED, so it's validated via backtest.py before it
+    # touches live trades. A blocked long is logged skipped; an allowed long's
+    # size is scaled by the regime's exposure confidence.
+    import regime as _regime
+    regime_scale = 1.0
+    if _regime.REGIME_GATE_ENABLED:
+        reg_ok, regime_scale, reg_reason = _regime.gate_for_direction(direction)
+        if not reg_ok:
+            log.info("  REGIME GATE — %s %s/%s skipped: %s", ceo, topic, ticker, reg_reason)
+            log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
+                      direction, confidence, tightness, sentiment,
+                      None, "skipped", side_str, skip_reason=f"regime: {reg_reason}",
+                      notional=0.0)
+            if "id" in sig:
+                mark_signal_processed(db, sig["id"], None)
+            return
+
     # Portfolio risk caps — block new entries past position/loss limits.
     allowed, reason = risk_gate(db, ticker, dry_run)
     if not allowed:
@@ -848,8 +867,14 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
             mark_signal_processed(db, sig["id"], None)
         return
 
-    # Conviction-scaled position size
-    notional = position_notional(confidence, tightness)
+    # Sector reactivity weight (Part I): down-weight sentiment signals in
+    # low-reactivity sectors (e.g. Energy); structured signals are unscaled.
+    import sector_map as _sector
+    sector_scale = (_sector.signal_weight(ticker, topic)
+                    if _sector.SECTOR_WEIGHTING_ENABLED else 1.0)
+
+    # Conviction-scaled position size, then scaled by regime + sector confidence
+    notional = round(position_notional(confidence, tightness) * regime_scale * sector_scale, 2)
 
     try:
         order_id = place_order(ticker, direction, notional, dry_run)

@@ -67,7 +67,9 @@ Neon PostgreSQL  ←→  Streamlit (app.py)  ←→  yfinance
 
 - **Automated daily retraining** — GitHub Actions runs at 8am EST on weekdays, ingests fresh data, retrains the model, and commits the updated `.pkl` back to the repo with a date-stamped message.
 
-- **145-test suite** across 10 files — all external dependencies (Twitter/syndication, SEC EDGAR, Reddit, Alpaca, Alpha Vantage, Finnhub) are mocked. Tests cover sentiment scoring, API response schemas, engagement parsing edge cases, ML feature contract enforcement, inference-time correctness, the Form 4 parser, Reddit ticker/spike logic, and event-study return math.
+- **Market-regime gate** — a top-level trend (SPY vs 200-day SMA) + volatility (VIX) overlay that gates long entries and scales position size by regime confidence, implementing the two-stage "gate over ranker" design from the research brief. Disabled until `backtest.py` shows it cuts drawdown ~25–30% out-of-sample.
+
+- **178-test suite** across 14 files — all external dependencies (Twitter/syndication, SEC EDGAR, Reddit, Alpaca, Alpha Vantage, Finnhub) are mocked. Tests cover sentiment scoring, API response schemas, engagement parsing edge cases, ML feature contract enforcement, inference-time correctness, the Form 4 parser, Reddit ticker/spike logic, event-study return math, regime-gate states, sector reactivity, and the bot/pump-dump risk filters.
 
 ---
 
@@ -95,6 +97,7 @@ Congressional and policy posts are exempt from the sentiment gate (they're factu
 - **Scheduled exits** — every entry is recorded in `managed_positions` and closed at the next trading day's close (the model's prediction horizon), not left open until a reversing signal.
 - **Idempotency** — a signal is never traded twice (guards retries and the Render-worker + GitHub-Actions overlap).
 - **Market-hours aware** — signals found outside market hours are queued in `signal_queue` and executed at the next open.
+- **Regime gate (longs-only, opt-in)** — when `REGIME_GATE_ENABLED=true`, long entries fire only when SPY is above its 200-day SMA (and VIX isn't in a crisis regime), with size scaled by regime confidence; shorts are ungated. Off by default until validated by `backtest.py`.
 
 The relationship registry (`ceo_ticker_relationships`, built by `relationship_analysis.py`) scores each (account, topic, ticker) link by directional hit rate, statistical significance, and volatility amplification into a `tightness_score`, which gates and sizes the tweet-based trades.
 
@@ -200,6 +203,8 @@ REDDIT_CLIENT_ID=your_reddit_app_id           # reddit_ingest.py (free 'script' 
 REDDIT_CLIENT_SECRET=your_reddit_app_secret
 REDDIT_USER_AGENT="MoneyMaker:reddit_ingest:v1 (by u/you)"
 # TWEET_SOURCE=syndication                    # default free tweet backend; set to 'twikit' to use cookies
+# REGIME_GATE_ENABLED=false                    # opt-in market-regime gate (validate with backtest.py first)
+# SECTOR_WEIGHTING_ENABLED=false               # opt-in sector reactivity sizing for sentiment signals
 
 # 2b. (Optional) twikit cookies — only needed if TWEET_SOURCE=twikit.
 #     The default 'syndication' backend needs no cookies. To use twikit instead:
@@ -228,6 +233,11 @@ python3 reddit_ingest.py            # WSB/stocks mention + sentiment spikes (nee
 python3 event_study.py --source insider     # insider trades, 1/3/5-day forward abnormal returns
 python3 event_study.py --source congress     # congressional trades
 python3 event_study.py --source reddit        # reddit spikes
+
+# 6c. Validate the market-regime gate before enabling it (read-only, no trades)
+python3 backtest.py --source congress --hold 3   # ungated vs regime-gated vs benchmarks
+#     Enable live only if it cuts drawdown ~25-30% without Sharpe loss:
+#     set REGIME_GATE_ENABLED=true (gates LONG entries; shorts stay ungated)
 
 # 7. Run the trading watcher
 python3 watch.py --once --db-only --dry-run   # one cycle, no orders (safe smoke test)
@@ -277,7 +287,7 @@ of silent.
 ## Tests
 
 ```
-145 tests · 10 files · all external APIs mocked · no credentials needed
+178 tests · 14 files · all external APIs mocked · no credentials needed
 ```
 
 | File | What it covers |
@@ -292,6 +302,10 @@ of silent.
 | `test_reddit.py` | Reddit ticker extraction (cashtags, stopwords) and mention/sentiment spike detection |
 | `test_tweet_sources.py` | Syndication `__NEXT_DATA__` parsing, retweet skipping, timestamp parsing |
 | `test_event_study.py` | Forward-return math, market-abnormal orientation, strategy-return aggregation |
+| `test_regime.py` | Trend (200d SMA) + VIX regime states, gate long/short logic, crisis-vol override, causal lag |
+| `test_sector_map.py` | Ticker→sector lookup, reactivity ordering (tech>energy), structured-vs-sentiment weighting |
+| `test_risk_filters.py` | Bot/coordination heuristics, duplicate-ratio, pump-and-dump detection, micro-cap guard |
+| `test_backtest.py` | Equity-metric math (return/Sharpe/drawdown), causal regime lookup / fail-open |
 
 ---
 

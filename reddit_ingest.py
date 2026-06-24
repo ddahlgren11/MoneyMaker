@@ -44,6 +44,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
 from classifier import get_sentiment_score
+from risk_filters import is_bot_like
 
 load_dotenv()
 
@@ -230,6 +231,17 @@ def ingest(dry_run: bool = False, use_finbert: bool = False) -> int:
                 blob = f"{post.title}\n{getattr(post, 'selftext', '') or ''}"
                 tickers = extract_tickers(blob, universe)
                 if not tickers:
+                    continue
+                # Bot filter (Part I risk control): skip brand-new accounts.
+                age_days = None
+                try:
+                    import time as _time
+                    ca = getattr(getattr(post, "author", None), "created_utc", None)
+                    if ca:
+                        age_days = (_time.time() - ca) / 86400
+                except Exception:
+                    age_days = None
+                if is_bot_like(age_days):
                     continue
                 s = get_sentiment_score(blob)
                 for tk in tickers:
