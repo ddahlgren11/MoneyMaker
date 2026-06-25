@@ -1,0 +1,37 @@
+name: SEC Insider Trade Ingest
+
+on:
+  schedule:
+    # 2x on weekdays (~10am, 5pm ET across EST/EDT). Form 4s must be filed within
+    # 2 business days, so they trickle in all day. Read-only ingest into
+    # insider_trades; trading stays gated behind INSIDER_TRADING_ENABLED.
+    - cron: '0 14,21 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  ingest:
+    name: Pull latest SEC Form 4 insider filings
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: requirements-watcher.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-watcher.txt
+
+      - name: Ingest SEC Form 4 insider trades
+        run: python3 insider_ingest.py
+        env:
+          DATABASE_URL:   ${{ secrets.DATABASE_URL }}
+          # SEC asks for a descriptive UA ("Name email"). Set the SEC_USER_AGENT
+          # repo secret; falls back to a generic identifier if unset.
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
