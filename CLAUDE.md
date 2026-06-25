@@ -82,7 +82,7 @@ Neon PostgreSQL (SQLAlchemy). Key tables:
 - `signal_queue` — signals found outside market hours, executed at next open (`watch.py`)
 - `managed_positions` — open positions with their scheduled next-day exit time (`watch.py`)
 - `congress_trades` — structured House/Senate disclosures from `congress_ingest.py`; the watcher trades unprocessed rows
-- `insider_trades` — structured SEC Form 4 insider filings from `insider_ingest.py`; `poll_insider_trades()` trades unprocessed rows (buys only by default — `INSIDER_BUYS_ONLY`)
+- `insider_trades` — structured SEC Form 4 insider filings from `insider_ingest.py`; `poll_insider_trades()` trades unprocessed rows but is **OFF unless `INSIDER_TRADING_ENABLED=true`** (validate with `event_study.py` first), and acts on buys only by default (`INSIDER_BUYS_ONLY`)
 - `reddit_sentiment` / `reddit_signals` — per-(date,ticker) mention counts + sentiment, and the spike-derived signals from `reddit_ingest.py`. `poll_reddit_signals()` trades them **only if `REDDIT_TRADING_ENABLED=true`** (off by default — validate with `event_study.py` first)
 - `paper_trades` — log of every placed/skipped/errored/exit trade
 - `watcher_state` — per-CEO last-seen tweet watermark and counters

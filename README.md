@@ -203,6 +203,7 @@ REDDIT_CLIENT_ID=your_reddit_app_id           # reddit_ingest.py (free 'script' 
 REDDIT_CLIENT_SECRET=your_reddit_app_secret
 REDDIT_USER_AGENT="MoneyMaker:reddit_ingest:v1 (by u/you)"
 # TWEET_SOURCE=syndication                    # default free tweet backend; set to 'twikit' to use cookies
+# INSIDER_TRADING_ENABLED=false                # opt-in: trade SEC Form 4 insider signals (validate with event_study.py first)
 # REGIME_GATE_ENABLED=false                    # opt-in market-regime gate (validate with backtest.py first)
 # SECTOR_WEIGHTING_ENABLED=false               # opt-in sector reactivity sizing for sentiment signals
 

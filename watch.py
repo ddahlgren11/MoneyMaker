@@ -98,6 +98,10 @@ CONGRESS_CONFIDENCE   = 80.0
 # Insider BUYS are the well-documented predictive signal; SELLS are noisy
 # (diversification/tax/10b5-1), so they're OFF by default — run event_study.py to
 # decide whether to enable them via INSIDER_BUYS_ONLY=false.
+# Trading is OFF by default: insider signals are collected/queryable but not
+# acted on until validated via event_study.py and explicitly enabled. This keeps
+# a merge to main inert until you flip the switch.
+INSIDER_TRADING_ENABLED = os.getenv("INSIDER_TRADING_ENABLED", "false").lower() == "true"
 INSIDER_RECENCY_DAYS  = int(os.getenv("INSIDER_RECENCY_DAYS", "3"))
 INSIDER_CONFIDENCE    = float(os.getenv("INSIDER_CONFIDENCE", "70.0"))
 INSIDER_BUYS_ONLY     = os.getenv("INSIDER_BUYS_ONLY", "true").lower() != "false"
@@ -1152,6 +1156,9 @@ def poll_congress_trades(dry_run: bool):
 # ---------------------------------------------------------------------------
 
 def poll_insider_trades(dry_run: bool):
+    if not INSIDER_TRADING_ENABLED:
+        return  # collected/queryable, but not traded until validated + enabled
+
     now_et = datetime.now(ET)
     status = market_status(now_et)
     cutoff = (now_et.date() - timedelta(days=INSIDER_RECENCY_DAYS)).isoformat()
