@@ -15,18 +15,22 @@ def _html_with(tweets):
     ]}}}}
     return ('<html><script id="__NEXT_DATA__" type="application/json">'
             + json.dumps(payload)
-            + "</script></html>").encode("utf-8")
+            + "</script></html>")
 
 
 class _FakeResp:
-    def __init__(self, body): self._b = body
-    def read(self): return self._b
-    def __enter__(self): return self
-    def __exit__(self, *a): return False
+    """Mimics the bits of a requests.Response that fetch_syndication uses."""
+    def __init__(self, text, status=200):
+        self.text = text
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise ts.requests.HTTPError(f"{self.status_code}")
 
 
 def _patch_fetch(monkeypatch, body):
-    monkeypatch.setattr(ts.urllib.request, "urlopen", lambda *a, **k: _FakeResp(body))
+    monkeypatch.setattr(ts.requests, "get", lambda *a, **k: _FakeResp(body))
 
 
 def test_parses_basic_tweet(monkeypatch):
@@ -67,7 +71,7 @@ def test_limit_respected(monkeypatch):
 
 
 def test_missing_next_data_returns_empty(monkeypatch):
-    _patch_fetch(monkeypatch, b"<html>no script here</html>")
+    _patch_fetch(monkeypatch, "<html>no script here</html>")
     assert ts.fetch_syndication("x") == []
 
 

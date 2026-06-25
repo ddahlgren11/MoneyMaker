@@ -19,9 +19,9 @@ import re
 import json
 import time
 import logging
-import urllib.request
-import urllib.error
 from datetime import datetime, timezone
+
+import requests
 
 log = logging.getLogger("tweet_sources")
 
@@ -49,22 +49,21 @@ def fetch_syndication(handle: str, limit: int = 100, timeout: int = 30) -> list[
     (with a logged warning) on any fetch/parse failure — never raises.
     """
     url = _SYNDICATION_URL.format(handle=handle)
-    req = urllib.request.Request(url, headers={"User-Agent": _BROWSER_UA,
-                                               "Accept-Language": "en-US,en;q=0.9"})
-    # The syndication endpoint throttles aggressively; retry 429s with backoff.
+    # NOTE: use `requests`, not urllib — the syndication endpoint 429s urllib's
+    # request signature regardless of headers, but serves requests/curl fine.
+    headers = {"User-Agent": _BROWSER_UA, "Accept": "*/*",
+               "Accept-Language": "en-US,en;q=0.9"}
     html = None
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                html = r.read().decode("utf-8", "replace")
-            break
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt < 2:
-                time.sleep(2 * (attempt + 1))
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            if resp.status_code == 429 and attempt < 2:
+                time.sleep(2 * (attempt + 1))  # genuine rate-limit → back off
                 continue
-            log.warning("syndication fetch failed for @%s: %s", handle, e)
-            return []
-        except Exception as e:
+            resp.raise_for_status()
+            html = resp.text
+            break
+        except requests.RequestException as e:
             log.warning("syndication fetch failed for @%s: %s", handle, e)
             return []
     if html is None:
