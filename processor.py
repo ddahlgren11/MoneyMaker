@@ -9,6 +9,7 @@ from classifier import get_sentiment_score, get_finbert_scores_batch
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
+from alpaca.data.enums import DataFeed
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -21,6 +22,11 @@ COOKIES_PATH = os.path.join(os.path.dirname(__file__), "twitter_cookies.json")
 # that cookies expire and freeze ingestion) or "twikit" (cookie auth, supports
 # deeper pagination/backfill). Override with TWEET_SOURCE in the environment.
 TWEET_SOURCE = os.getenv("TWEET_SOURCE", "syndication").lower()
+
+# Market-data feed. Free / paper accounts only get IEX; SIP needs a paid
+# subscription (a SIP request on a free key 403s "subscription does not permit").
+# Default to IEX so the pipeline works on free keys; override with ALPACA_DATA_FEED=sip.
+_DATA_FEED = DataFeed.SIP if os.getenv("ALPACA_DATA_FEED", "iex").lower() == "sip" else DataFeed.IEX
 
 
 class TwitterAuthError(RuntimeError):
@@ -180,6 +186,7 @@ class DataProcessor:
         if start_date is None:
             start_date = end_date - timedelta(days=7)
 
-        request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day, start=start_date, end=end_date)
+        request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Day,
+                                   start=start_date, end=end_date, feed=_DATA_FEED)
         bars = self.stock_client.get_stock_bars(request)
         return bars.df if bars else pd.DataFrame()
