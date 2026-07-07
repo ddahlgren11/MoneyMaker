@@ -920,10 +920,21 @@ def _execute_signal(sig: dict, db, dry_run: bool, source: str = "live"):
             mark_signal_processed(db, sig["id"], order_id)
 
     except Exception as e:
-        log.error("  Order failed for %s/%s: %s", ceo, ticker, e)
+        msg = str(e).lower()
+        # Flag Alpaca's intraday-margin pre-trade rejection distinctly so it's
+        # obvious in the logs (vs. a generic API error). See the 2026 intraday
+        # margin framework — orders that would cause a margin deficit are rejected.
+        if any(s in msg for s in ("margin", "buying power", "insufficient")):
+            log.warning("  MARGIN REJECTION — %s/%s order rejected (intraday margin / "
+                        "buying power): %s. Consider lowering MAX_OPEN_POSITIONS or "
+                        "MAX_NOTIONAL.", ceo, ticker, e)
+            reason = f"margin rejection: {e}"
+        else:
+            log.error("  Order failed for %s/%s: %s", ceo, ticker, e)
+            reason = str(e)
         log_trade(db, ceo, tweet_text, tweet_date, topic, ticker,
                   direction, confidence, tightness, sentiment,
-                  None, "error", side_str, skip_reason=str(e), notional=notional)
+                  None, "error", side_str, skip_reason=reason, notional=notional)
         # Always retire the queue entry on failure — don't retry indefinitely
         if "id" in sig:
             mark_signal_processed(db, sig["id"], None)
