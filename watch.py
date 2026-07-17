@@ -95,6 +95,10 @@ CONGRESS_CONFIDENCE   = 80.0
 # underperform just holding SPY), while the SELLS carry the only (weak, unproven)
 # edge. When true, skip the buys and trade sells only. See the strategy bake-off.
 CONGRESS_SELLS_ONLY   = os.getenv("CONGRESS_SELLS_ONLY", "false").lower() == "true"
+# Conviction: size congress trades by cluster (distinct members on the same
+# ticker/direction in a recent window) + disclosed amount. Optionally skip
+# low-conviction singletons by raising CONGRESS_MIN_CLUSTER above 1.
+CONGRESS_MIN_CLUSTER  = int(os.getenv("CONGRESS_MIN_CLUSTER", "1"))
 
 # ── SEC Form 4 insider trades (ingested by insider_ingest.py into insider_trades) ─
 # Structured corporate-insider analogue of congressional trades: open-market buy
@@ -1140,13 +1144,37 @@ def poll_congress_trades(dry_run: bool):
                 db.execute(text("UPDATE congress_trades SET processed = TRUE WHERE id = :id"),
                            {"id": r.id})
                 continue
+
+            # Conviction: cluster of distinct members on this ticker+direction in a
+            # recent window, plus disclosed amount → scales the position size.
+            from congress_conviction import (parse_amount_range, conviction_score,
+                                             CLUSTER_WINDOW_DAYS)
+            try:
+                win_start = (datetime.fromisoformat(str(r.disclosure_date)).date()
+                             - timedelta(days=CLUSTER_WINDOW_DAYS)).isoformat()
+            except ValueError:
+                win_start = r.disclosure_date
+            cluster_n = db.execute(
+                text("""SELECT count(DISTINCT member) FROM congress_trades
+                        WHERE ticker = :tk AND direction = :dir
+                          AND disclosure_date >= :ws AND disclosure_date <= :disc"""),
+                {"tk": r.ticker, "dir": r.direction, "ws": win_start, "disc": r.disclosure_date},
+            ).scalar() or 1
+            if cluster_n < CONGRESS_MIN_CLUSTER:
+                log.info("  CONGRESS %s → skip %s (cluster %d < min %d)",
+                         r.member, r.ticker, cluster_n, CONGRESS_MIN_CLUSTER)
+                db.execute(text("UPDATE congress_trades SET processed = TRUE WHERE id = :id"),
+                           {"id": r.id})
+                continue
+            conviction = conviction_score(cluster_n, parse_amount_range(r.amount))
+
             sig = {
                 "ceo":        f"congress:{r.member}"[:64],
                 "tweet_text": f"{r.member} {r.txn_type} {r.ticker} ({r.amount}) disclosed {r.disclosure_date}",
                 "tweet_date": r.disclosure_date,
                 "topic":      "congressional_trade",
                 "ticker":     r.ticker,
-                "tightness":  1.0,
+                "tightness":  conviction,   # cluster + amount → position size
                 "direction":  r.direction,
                 "confidence": CONGRESS_CONFIDENCE,
                 "sentiment":  0.0,
