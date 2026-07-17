@@ -18,6 +18,7 @@ import logging
 import os
 import sys
 import time
+import random
 from datetime import timedelta, datetime, date as date_type
 
 parser = argparse.ArgumentParser()
@@ -118,8 +119,15 @@ async def run():
     print(f"Pages per CEO: {PAGES}  (~{PAGES * 20} tweets max per CEO)")
     print(f"Mode: {'BACKFILL' if PAGES > 20 else 'daily'}\n")
 
+    # Shuffle handle order each run. The free syndication endpoint rate-limits
+    # after ~20 rapid requests, so a fixed order would perpetually starve the
+    # same tail handles; rotating priority means everyone gets covered across
+    # the day's scheduled runs (dedup makes repeated fetches harmless).
+    targets = list(TARGETS.items())
+    random.shuffle(targets)
+
     try:
-        for username, ticker in TARGETS.items():
+        for username, ticker in targets:
             print(f"\n── {username} / {ticker} ──")
 
             try:
