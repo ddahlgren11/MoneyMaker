@@ -91,6 +91,10 @@ MAX_DAILY_LOSS     = float(os.getenv("MAX_DAILY_LOSS", "1500"))  # halt new entr
 # trade the entire recent backlog. The signal is the disclosure becoming public.
 CONGRESS_RECENCY_DAYS = int(os.getenv("CONGRESS_RECENCY_DAYS", "4"))
 CONGRESS_CONFIDENCE   = 80.0
+# Event study + backtest both show congressional BUYS have no edge (they
+# underperform just holding SPY), while the SELLS carry the only (weak, unproven)
+# edge. When true, skip the buys and trade sells only. See the strategy bake-off.
+CONGRESS_SELLS_ONLY   = os.getenv("CONGRESS_SELLS_ONLY", "false").lower() == "true"
 
 # ── SEC Form 4 insider trades (ingested by insider_ingest.py into insider_trades) ─
 # Structured corporate-insider analogue of congressional trades: open-market buy
@@ -1129,6 +1133,13 @@ def poll_congress_trades(dry_run: bool):
 
         log.info("Congress: %d newly disclosed trade(s) to act on", len(rows))
         for r in rows:
+            # Buys have no measured edge (they underperform SPY); trade sells only
+            # when configured. Mark processed so the skipped buy doesn't linger.
+            if CONGRESS_SELLS_ONLY and r.direction == "Up":
+                log.info("  CONGRESS %s → skip BUY %s (sells-only mode)", r.member, r.ticker)
+                db.execute(text("UPDATE congress_trades SET processed = TRUE WHERE id = :id"),
+                           {"id": r.id})
+                continue
             sig = {
                 "ceo":        f"congress:{r.member}"[:64],
                 "tweet_text": f"{r.member} {r.txn_type} {r.ticker} ({r.amount}) disclosed {r.disclosure_date}",

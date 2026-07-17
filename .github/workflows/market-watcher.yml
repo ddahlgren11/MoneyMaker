@@ -51,3 +51,5 @@ jobs:
           ALPACA_PAPER_SECRET_KEY:  ${{ secrets.ALPACA_PAPER_SECRET_KEY }}
           FINNHUB_API_KEY:          ${{ secrets.FINNHUB_API_KEY }}
           ALPHA_VANTAGE_API_KEY:    ${{ secrets.ALPHA_VANTAGE_API_KEY }}
+          # Trade congressional sells only — buys have no measured edge (bake-off).
+          CONGRESS_SELLS_ONLY:      "true"
