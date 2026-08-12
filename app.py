@@ -285,7 +285,7 @@ h2, h3 {
 
 st.markdown("""
 <div class="app-header">
-    <h1>📈 MoneyMaker</h1>
+    <div style="display: flex; align-items: center; gap: 0.5rem;"><span style="font-size: 2.2rem;">📈</span><h1>MoneyMaker</h1></div>
     <p>CEO tweet sentiment analysis & stock market correlation</p>
 </div>
 """, unsafe_allow_html=True)
